@@ -53,7 +53,7 @@ async function handle(message) {
   if (!Object.hasOwn(message, 'id')) return;
   const reply = result => process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, result })}\n`);
   const error = (code, text) => process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code, message: text } })}\n`);
-  if (message.method === 'initialize') return reply({ protocolVersion: ['2024-11-05', '2025-03-26', '2025-06-18'].includes(message.params?.protocolVersion) ? message.params.protocolVersion : '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: SERVER_NAME, version: '0.6.0' } });
+  if (message.method === 'initialize') return reply({ protocolVersion: ['2024-11-05', '2025-03-26', '2025-06-18'].includes(message.params?.protocolVersion) ? message.params.protocolVersion : '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: SERVER_NAME, version: '0.6.1' } });
   if (message.method === 'ping') return reply({});
   if (message.method === 'tools/list') return reply({ tools });
   if (message.method === 'tools/call') {

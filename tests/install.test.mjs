@@ -59,6 +59,31 @@ test('bridge add --no-start：自动挑空闲端口并持久化，两次端口�
   }
 });
 
+test('update：按回执重放注册并刷新技能，--skip-pull 跳过 git', (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-update-'));
+  const appData = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-update2-'));
+  t.after(() => { fs.rmSync(home, { recursive: true, force: true }); fs.rmSync(appData, { recursive: true, force: true }); });
+  assert.equal(run(['register', 'zcode', '--port', '17653'], home, appData).status, 0);
+  assert.equal(run(['register', 'codex', '--port', '17653'], home, appData).status, 0);
+  const receipt = JSON.parse(fs.readFileSync(path.join(home, '.zcode', 'ai-browser-control', 'installed.json'), 'utf8'));
+  assert.equal(receipt.entries.length, 2);
+
+  // 模拟"仓库更新后本地副本还是旧的"：清掉已装内容
+  const config = path.join(home, '.zcode', 'cli', 'config.json');
+  fs.writeFileSync(config, JSON.stringify({ theme: 'light' }));
+  fs.rmSync(path.join(home, '.zcode', 'skills', 'ai-browser-control'), { recursive: true, force: true });
+
+  const update = run(['update', '--skip-pull'], home, appData);
+  assert.equal(update.status, 0, update.stderr);
+  assert.match(update.stdout, /✓ zcode：已刷新/);
+  assert.match(update.stdout, /✓ codex：已刷新/);
+  const json = JSON.parse(fs.readFileSync(config, 'utf8'));
+  assert.match(json.mcp.servers['ai-browser-17653'].args[0], /server[\\/]mcp\.mjs$/);
+  const skill = path.join(home, '.zcode', 'skills', 'ai-browser-control', 'SKILL.md');
+  assert.equal(fs.existsSync(skill), true);
+  assert.match(fs.readFileSync(skill, 'utf8'), /直接调用/);
+});
+
 test('register zcode：写入用户级 mcp.servers，保留既有设置与其他服务器，备份且幂等', (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-reg-zcode-'));
   const appData = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-reg-zcode2-'));

@@ -138,7 +138,7 @@ export function createBridge({ port = DEFAULT_PORT, host = '127.0.0.1', configDi
       const identityMatches = typeof clientId === 'string' &&
         (!origin || clientId === origin.slice('chrome-extension://'.length));
       const clientMatches = identityMatches && allowedOrigins.includes(`chrome-extension://${clientId}`);
-      if (req.url === '/health' && req.method === 'GET') return json(res, 200, { service: SERVICE_NAME, version: '0.6.0' });
+      if (req.url === '/health' && req.method === 'GET') return json(res, 200, { service: SERVICE_NAME, version: '0.6.1' });
       // 跨机器访问防护：非回环来源必须持有效 token；configured allowedIps 时再限来源 IP。
       // 本机回环豁免（扩展与本地 agent 不受影响）。
       const sourceIp = String(req.socket.remoteAddress ?? '').replace(/^::ffff:/, '');

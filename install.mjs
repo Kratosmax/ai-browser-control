@@ -25,6 +25,7 @@ const nodeExe = process.execPath;
 const mcpJs = path.join(repoDir, 'server', 'mcp.mjs');
 const baseDir = path.join(home, '.zcode', 'ai-browser-control');
 const bridgesFile = path.join(baseDir, 'bridges.json');
+const receiptFile = path.join(baseDir, 'installed.json');
 const mode = argv[0];
 const target = argv[1];
 
@@ -115,6 +116,23 @@ function upsertGuidance(file) {
 function writeText(file, text) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, text);
+}
+
+// 注册回执：记录 register 过的目标与参数，update 时按它重放，实现一键更新。
+function loadReceipt() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+    if (Array.isArray(parsed.entries)) return parsed.entries;
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  return [];
+}
+
+function saveReceipt(entries) {
+  fs.mkdirSync(baseDir, { recursive: true });
+  // 含远程 token，与本目录其他凭据同等对待（0600）。
+  fs.writeFileSync(receiptFile, JSON.stringify({ entries }, null, 2), { mode: 0o600 });
 }
 
 function readMcpJson(file) {
@@ -266,7 +284,10 @@ async function registerMode() {
     return;
   }
   const where = agent.install(port, host, token);
-  console.log(`✓ ${agent.name}：已注册 ${entryName(port, host)} → ${where}\n  重启该 agent 生效；浏览器侧需手动加载 extension/ 目录、扩展弹窗端口填 ${port}（见 README）。`);
+  const receipt = loadReceipt().filter(r => !(r.agent === target && r.port === port && (r.host ?? '127.0.0.1') === host));
+  receipt.push({ agent: target, port, host, token });
+  saveReceipt(receipt);
+  console.log(`✓ ${agent.name}：已注册 ${entryName(port, host)} → ${where}\n  重启该 agent 生效；浏览器侧需手动加载 extension/ 目录、扩展弹窗端口填 ${port}（见 README）。\n  以后更新只需：node install.mjs update`);
 }
 
 function lanIPv4s() {
@@ -353,12 +374,42 @@ ${host === '127.0.0.1' ? `2. 注册给本机 agent：node install.mjs register <
   process.exitCode = 1;
 }
 
+async function updateMode() {
+  // 1. 拉取最新代码（git 安装）；ZIP 安装的用户重新下载覆盖后再跑一次本命令。
+  if (hasFlag('skip-pull')) {
+    console.log('（--skip-pull：跳过 git pull）');
+  } else if (fs.existsSync(path.join(repoDir, '.git'))) {
+    const pull = spawnSync('git', ['-C', repoDir, 'pull', '--ff-only'], { shell: true, encoding: 'utf8' });
+    console.log((pull.stdout ?? pull.stderr ?? '').trim() || 'git pull 完成');
+    if (pull.status !== 0) console.log('  （git pull 未成功，以下用当前本地代码重放注册）');
+  } else {
+    console.log('目录不是 git 仓库（ZIP 安装）：重新下载覆盖本目录后，重跑本命令完成注册刷新。');
+  }
+  // 2. 按回执重放注册：刷新 MCP 条目、指引块与技能副本。
+  const receipt = loadReceipt();
+  if (!receipt.length) { console.log('没有登记过的注册：先运行 node install.mjs register <agent> --port <端口>'); return; }
+  let ok = 0;
+  for (const e of receipt) {
+    const agent = agents.find(a => a.name === e.agent);
+    if (!agent) continue;
+    try {
+      const where = agent.install(e.port, e.host ?? '127.0.0.1', e.token ?? '');
+      ok++;
+      console.log(`✓ ${e.agent}：已刷新 → ${where}`);
+    } catch (error) {
+      console.log(`✗ ${e.agent}：${error.message}`);
+    }
+  }
+  console.log(`刷新完成（${ok}/${receipt.length}）。重启对应 agent 生效。`);
+}
+
 try {
   if (mode === 'check') await checkMode();
   else if (mode === 'register') await registerMode();
   else if (mode === 'bridge') await bridgeMode();
+  else if (mode === 'update') await updateMode();
   else {
-    console.error('用法：node install.mjs check | register <agent> [--port N] | bridge add|list|remove\n本脚本不扫描、不批量注册；注册目标必须显式指定。');
+    console.error('用法：node install.mjs check | register <agent> [--port N] | bridge add|list|token|remove | update\n本脚本不扫描、不批量注册；注册目标必须显式指定。');
     process.exitCode = 1;
   }
 } catch (error) {

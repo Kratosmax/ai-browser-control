@@ -193,7 +193,7 @@ test('插件清单、市场、图标指向同一版本及实际资源', async ()
   await fs.access(mcp.mcpServers['ai-browser'].command);
   const extension = JSON.parse(await fs.readFile(path.join(root, 'extension', 'manifest.json'), 'utf8'));
   assert.equal(extension.name, 'AI Browser Control');
-  assert.equal(extension.version, '0.6.0');
+  assert.equal(extension.version, '0.6.1');
   for (const file of Object.values(extension.icons)) await fs.access(path.join(root, 'extension', file));
   await fs.access(path.join(root, manifest.skills, 'ai-browser-control', 'SKILL.md'));
 });

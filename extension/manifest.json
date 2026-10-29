@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AI Browser Control",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "让 AI Agent 通过本机桥按标签页控制授权的 HTTP(S) 网页：一键配对，支持多桥端口与自动授权。",
   "minimum_chrome_version": "120",
   "permissions": ["alarms", "debugger", "scripting", "storage", "tabs"],
