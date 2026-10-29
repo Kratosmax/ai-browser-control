@@ -8,10 +8,50 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { restartOutdatedBridges, killPortListener } from '../install.mjs';
+
 const repo = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const run = (args, home, appData) => spawnSync(process.execPath, [path.join(repo, 'install.mjs'), ...args, '--home', home], {
   encoding: 'utf8',
   env: { ...process.env, APPDATA: appData }
+});
+
+test('restartOutdatedBridges：旧版本桥被替换为当前版本进程', async (t) => {
+  const net = await import('node:net');
+  const { spawn } = await import('node:child_process');
+  const portFree = (port) => new Promise((res) => {
+    const srv = net.createServer();
+    srv.once('error', () => res(false));
+    srv.once('listening', () => srv.close(() => res(true)));
+    srv.listen(port, '127.0.0.1');
+  });
+  let port = 17990;
+  while (port < 18020 && !(await portFree(port))) port++;
+  assert.ok(port < 18020, '找到空闲测试端口');
+
+  // 用当前代码启动一个"运行中的桥"进程
+  const logDir = path.join(os.tmpdir(), 'zcode-restart-' + String(port));
+  fs.mkdirSync(logDir, { recursive: true });
+  const log = fs.openSync(path.join(logDir, 'bridge.log'), 'a');
+  const child = spawn(process.execPath, [path.join(repo, 'server', 'bridge.mjs'), '--bridge', '--port', String(port)], { detached: true, stdio: ['ignore', log, log] });
+  child.unref();
+  fs.closeSync(log);
+  const health = async () => { try { return await (await fetch('http://127.0.0.1:' + port + '/health')).json(); } catch { return null; } };
+  let h = null;
+  for (let i = 0; i < 30 && !(h = await health()); i++) await new Promise(r => setTimeout(r, 200));
+  assert.ok(h, '测试桥应启动');
+
+  const pluginVersion = JSON.parse(fs.readFileSync(path.join(repo, '.zcode-plugin', 'plugin.json'), 'utf8')).version;
+  const result = await restartOutdatedBridges({ candidates: [{ port, host: '127.0.0.1', allowIps: [] }], localVersion: '0.0.0-test' });
+  assert.equal(result.length, 1);
+  assert.equal(result[0].was, h.version);
+  await new Promise(r => setTimeout(r, 500));
+  const after = await health();
+  assert.equal(after?.version, pluginVersion, '重启后应为当前版本');
+
+  killPortListener(port);
+  fs.rmSync(logDir, { recursive: true, force: true });
+  fs.rmSync(path.join(os.homedir(), '.zcode', 'ai-browser-control', String(port)), { recursive: true, force: true });
 });
 
 test('check 只读预检：输出指引与桥清单，不创建任何配置', (t) => {

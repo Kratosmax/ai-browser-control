@@ -1,6 +1,6 @@
 {
   "name": "ai-browser-control",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "让任意 AI Agent 通过配对的 Edge/Chrome 扩展，按标签页读取和操作外部浏览器，不占用系统鼠标。",
   "author": { "name": "Local Tools" },
   "mcpServers": "./.mcp.json",

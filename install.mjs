@@ -296,6 +296,61 @@ function lanIPv4s() {
     .map(i => i.address);
 }
 
+// 结束监听指定端口的进程（桥重启用）；返回是否找到并处理。
+export function killPortListener(port) {
+  const out = spawnSync('netstat', ['-ano', '-p', 'tcp'], { encoding: 'utf8' }).stdout ?? '';
+  const pids = new Set();
+  for (const line of out.split('\n')) {
+    if (!/LISTENING/i.test(line)) continue;
+    const cols = line.trim().split(/\s+/);
+    if ((cols[1] ?? '').endsWith(`:${port}`)) pids.add(cols.at(-1));
+  }
+  for (const pid of pids) {
+    if (Number(pid) === process.pid) continue;
+    spawnSync('taskkill', ['/PID', pid, '/F'], { encoding: 'utf8' });
+  }
+  return pids.size > 0;
+}
+
+function waitBridgeHealth(port, timeoutMs = 5000) {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const probe = async () => {
+      try {
+        return resolve(await (await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(800) })).json());
+      } catch {
+        if (Date.now() - started > timeoutMs) return resolve(null);
+        setTimeout(probe, 200);
+      }
+    };
+    probe();
+  });
+}
+
+// 对本机上运行中的桥做版本比对，旧了就自动重启到当前代码（单次遍历，不循环重试）。
+export async function restartOutdatedBridges({ candidates, localVersion }) {
+  const restarted = [];
+  for (const c of candidates) {
+    let health = null;
+    try {
+      health = await (await fetch(`http://127.0.0.1:${c.port}/health`, { signal: AbortSignal.timeout(1200) })).json();
+    } catch {}
+    if (!health || health.service !== 'ai-browser-control' || health.version === localVersion) continue;
+    const was = health.version;
+    const killed = killPortListener(c.port);
+    const dir = path.join(baseDir, String(c.port));
+    fs.mkdirSync(dir, { recursive: true });
+    const log = fs.openSync(path.join(dir, 'bridge.log'), 'a');
+    const child = spawn(process.execPath, [path.join(repoDir, 'server', 'bridge.mjs'), '--bridge', '--port', String(c.port), '--host', c.host ?? '127.0.0.1', ...(c.allowIps ?? []).flatMap(ip => ['--allow-ip', ip])], { detached: true, windowsHide: true, stdio: ['ignore', log, log] });
+    child.on('error', () => {});
+    child.unref();
+    fs.closeSync(log);
+    const after = await waitBridgeHealth(c.port);
+    restarted.push({ port: c.port, was, now: after?.version ?? '未响应', killed });
+  }
+  return restarted;
+}
+
 function printToken(port) {
   let token = '';
   try { token = fs.readFileSync(path.join(baseDir, String(port), 'token'), 'utf8').trim(); } catch {}
@@ -400,19 +455,34 @@ async function updateMode() {
       console.log(`✗ ${e.agent}：${error.message}`);
     }
   }
+  // 3. 运行中的桥若为旧版本，自动重启到当前代码（扩展数秒内自动重连）。
+  const pluginVersion = JSON.parse(fs.readFileSync(path.join(repoDir, '.zcode-plugin', 'plugin.json'), 'utf8')).version;
+  const seenPorts = new Set();
+  const candidates = [...loadBridges(), { port: 17653, host: '127.0.0.1', allowIps: [] }]
+    .filter(b => (seenPorts.has(b.port) ? false : (seenPorts.add(b.port), true)));
+  const restarted = await restartOutdatedBridges({ candidates, localVersion: pluginVersion });
+  if (restarted.length) {
+    for (const r of restarted) console.log(`✓ 桥 ${r.port}：${r.was} → ${r.now}${r.killed ? '（已替换旧进程）' : '（原进程未找到，直接新起）'}`);
+  } else {
+    console.log('桥实例均为当前版本，无需重启。');
+  }
   console.log(`刷新完成（${ok}/${receipt.length}）。重启对应 agent 生效。`);
 }
 
-try {
-  if (mode === 'check') await checkMode();
-  else if (mode === 'register') await registerMode();
-  else if (mode === 'bridge') await bridgeMode();
-  else if (mode === 'update') await updateMode();
-  else {
-    console.error('用法：node install.mjs check | register <agent> [--port N] | bridge add|list|token|remove | update\n本脚本不扫描、不批量注册；注册目标必须显式指定。');
+// 作为 CLI 运行时才执行；被测试/其他模块 import 时不产生副作用。
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  try {
+    if (mode === 'check') await checkMode();
+    else if (mode === 'register') await registerMode();
+    else if (mode === 'bridge') await bridgeMode();
+    else if (mode === 'update') await updateMode();
+    else {
+      console.error('用法：node install.mjs check | register <agent> [--port N] | bridge add|list|token|remove | update\n本脚本不扫描、不批量注册；注册目标必须显式指定。');
+      process.exitCode = 1;
+    }
+  } catch (error) {
+    console.error(error.message);
     process.exitCode = 1;
   }
-} catch (error) {
-  console.error(error.message);
-  process.exitCode = 1;
 }
