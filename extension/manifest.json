@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "AI Browser Control",
+  "version": "0.6.0",
+  "description": "让 AI Agent 通过本机桥按标签页控制授权的 HTTP(S) 网页：一键配对，支持多桥端口与自动授权。",
+  "minimum_chrome_version": "120",
+  "permissions": ["alarms", "debugger", "scripting", "storage", "tabs"],
+  "host_permissions": [
+    "http://127.0.0.1:*/*",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "AI 浏览器控制",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src http://127.0.0.1:*"
+  }
+}

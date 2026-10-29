@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ai-browser": {
+      "command": "C:\\Program Files\\nodejs\\node.exe",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/server/mcp.mjs"]
+    }
+  }
+}

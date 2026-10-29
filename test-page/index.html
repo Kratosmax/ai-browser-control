@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Magpie 控制验收页</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+<main>
+<p class="eyebrow">本地浏览器控制测试</p>
+<h1>Magpie 控制验收页</h1>
+<p>在扩展中授权此页，然后切到其他标签页，让 ZCode 在后台填写并点击。页面不会向外部发送数据。</p>
+<label for="test-input">测试输入</label>
+<input id="test-input" type="text" placeholder="由 ZCode 在后台填写" autocomplete="off">
+<button id="record" type="button">记录一次</button>
+<section aria-live="polite"><h2>操作结果</h2><p>记录计数：<strong id="count">0</strong></p><p>记录文本：<output id="saved">尚未记录</output></p><p>页面可见状态：<span id="visibility"></span></p></section>
+<p class="note">验收目标：记录计数为 1，记录文本为 background-ok；操作时不切标签页、不移动系统鼠标。刷新可重置。</p>
+</main>
+<script src="/app.js"></script>
+</body></html>

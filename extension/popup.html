@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI 浏览器控制</title>
+  <link rel="stylesheet" href="popup.css">
+  <script src="popup.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>AI 浏览器控制</h1>
+      <p id="connection-status" class="status" aria-live="polite"><span id="status-dot" class="dot"></span><span id="status-text">读取中…</span></p>
+    </header>
+
+    <button id="toggle" type="button" class="toggle">开始连接</button>
+    <p id="message" role="status" aria-live="polite"></p>
+
+    <section class="card">
+      <label class="switch-row" for="auto-authorize">
+        <span class="switch-copy">
+          <strong>自动授权所有网页</strong>
+          <small>AI 可直接控制任意网页，无需逐页确认</small>
+        </span>
+        <input id="auto-authorize" type="checkbox">
+      </label>
+    </section>
+
+    <section class="card">
+      <h2>当前标签页</h2>
+      <p id="tab-title" class="tab-title">读取中…</p>
+      <p id="tab-status" class="status"></p>
+      <div class="actions">
+        <button id="authorize" type="button" class="ghost" disabled>授权此页</button>
+        <button id="release" type="button" class="ghost" disabled>释放授权</button>
+      </div>
+    </section>
+
+    <details id="advanced">
+      <summary>高级设置</summary>
+      <label class="field-label" for="bridge-port">本机桥端口</label>
+      <div class="actions">
+        <input id="bridge-port" type="number" min="1" max="65535" placeholder="17653">
+        <button id="save-port" type="button" class="ghost">保存</button>
+      </div>
+      <p class="hint">多浏览器时，每个浏览器填自己对应桥的端口。</p>
+    </details>
+
+    <p class="hint footer">仅支持 HTTP(S) 页面 · 控制时顶部出现“正在调试”提示条，点 × 立即打断</p>
+  </main>
+</body>
+</html>
