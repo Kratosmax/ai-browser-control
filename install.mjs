@@ -379,7 +379,7 @@ async function updateMode() {
   if (hasFlag('skip-pull')) {
     console.log('（--skip-pull：跳过 git pull）');
   } else if (fs.existsSync(path.join(repoDir, '.git'))) {
-    const pull = spawnSync('git', ['-C', repoDir, 'pull', '--ff-only'], { shell: true, encoding: 'utf8' });
+    const pull = spawnSync('git', ['-C', repoDir, 'pull', '--ff-only'], { encoding: 'utf8' });
     console.log((pull.stdout ?? pull.stderr ?? '').trim() || 'git pull 完成');
     if (pull.status !== 0) console.log('  （git pull 未成功，以下用当前本地代码重放注册）');
   } else {
