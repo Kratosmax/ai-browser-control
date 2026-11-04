@@ -159,8 +159,64 @@
     };
   }
 
+  // —— 可视光标：仅在写入操作时出现。纯 transform/opacity 合成器动画，
+  // 无事件监听器、无定时器、pointer-events:none，不影响页面交互与性能。——
+  let cursorHost = null;
+  let cursorSeen = false;
+
+  function ensureCursor() {
+    if (cursorHost && cursorHost.isConnected) return cursorHost.shadowRoot;
+    const host = document.createElement('div');
+    host.style.cssText = 'position:fixed;top:0;left:0;width:0;height:0;z-index:2147483647;pointer-events:none';
+    const shadow = host.attachShadow({ mode: 'closed' });
+    shadow.innerHTML = `<style>
+      #c { position: fixed; top: 0; left: 0; width: 22px; height: 22px; opacity: .95;
+           will-change: transform; transition: transform 210ms cubic-bezier(.22,.61,.36,1);
+           filter: drop-shadow(0 1px 2px rgba(0,0,0,.45)); }
+      #c.first { transition: none; }
+      #r { position: fixed; width: 14px; height: 14px; margin: -7px 0 0 -7px;
+           border: 2px solid rgba(37,99,235,.85); border-radius: 50%; opacity: 0;
+           will-change: transform, opacity; }
+      #r.play { animation: ab-ripple 450ms ease-out forwards; }
+      @keyframes ab-ripple { from { transform: scale(.45); opacity: .85; } to { transform: scale(3); opacity: 0; } }
+    </style>
+    <div id="c"><svg width="22" height="22" viewBox="0 0 24 24">
+      <path d="M5 2 L19 12.5 L11.8 13.6 L8.6 20.5 Z" fill="rgba(17,24,39,.82)" stroke="#fff" stroke-width="1.5"/>
+    </svg></div>
+    <div id="r"></div>`;
+    document.documentElement.appendChild(host);
+    cursorHost = host;
+    return shadow;
+  }
+
+  async function showCursor(point) {
+    const shadow = ensureCursor();
+    const cursor = shadow.getElementById('c');
+    const ripple = shadow.getElementById('r');
+    if (!cursorSeen) {
+      cursor.classList.add('first');   // 首次出现直接落在目标点，不从 (0,0) 飞过来
+      cursorSeen = true;
+    }
+    cursor.style.transform = `translate(${point.x - 2}px, ${point.y - 2}px)`;
+    ripple.style.left = `${point.x}px`;
+    ripple.style.top = `${point.y}px`;
+    await new Promise((r) => setTimeout(r, 210));   // 等滑动完成，与视觉同步后再点击
+    return { shown: true };
+  }
+
+  function cursorPulse(point) {
+    const shadow = ensureCursor();
+    const ripple = shadow.getElementById('r');
+    ripple.style.left = `${point.x}px`;
+    ripple.style.top = `${point.y}px`;
+    ripple.classList.remove('play');
+    void ripple.offsetWidth;                        // 重启动画
+    ripple.classList.add('play');
+    return { pulsed: true };
+  }
+
   Object.defineProperty(globalThis, '__zcodeTabAgent', {
-    value: Object.freeze({ snapshot, prepare, focus, focusTarget }),
+    value: Object.freeze({ snapshot, prepare, focus, focusTarget, showCursor, cursorPulse }),
     configurable: false,
     writable: false
   });

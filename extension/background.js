@@ -92,6 +92,8 @@ async function pageAgent(tabId, operation, ref) {
       if (name === 'prepare') return agent.prepare(elementRef);
       if (name === 'focus') return agent.focus(elementRef);
       if (name === 'focusTarget') return agent.focusTarget(elementRef);
+      if (name === 'showCursor') return agent.showCursor(elementRef);
+      if (name === 'cursorPulse') return agent.cursorPulse(elementRef);
       throw new Error('不支持的页面操作');
     },
     args: [operation, ref ?? null]
@@ -192,21 +194,31 @@ async function execute(command) {
         return pageAgent(tabId, 'snapshot');
       case 'click': {
         const { x, y } = await pageAgent(tabId, 'prepare', params.ref);
+        await pageAgent(tabId, 'showCursor', { x, y });          // 光标滑动到目标（210ms，与视觉同步）
         await cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
         await cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+        await pageAgent(tabId, 'cursorPulse', { x, y });         // 点击涟漪动画
         await cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
         return { clicked: true };
       }
       case 'fill':
         if (typeof params.text !== 'string') throw new Error('text 必须是字符串');
+        const spot = await pageAgent(tabId, 'prepare', params.ref);
+        await pageAgent(tabId, 'showCursor', { x: spot.x, y: spot.y });
         await pageAgent(tabId, 'focus', params.ref);
         await press(tabId, 'Control+A');
         if (params.text === '') await press(tabId, 'Backspace');
         else await cdp(tabId, 'Input.insertText', { text: params.text });
+        await pageAgent(tabId, 'cursorPulse', { x: spot.x, y: spot.y });
         return { filled: true };
       case 'press':
-        // 带 ref 时仅聚焦目标；不触发点击或表单提交。
-        if (params.ref !== undefined) await pageAgent(tabId, 'focusTarget', params.ref);
+        // 带 ref 时先定位并展示光标，再聚焦目标；不触发点击或表单提交。
+        if (params.ref !== undefined) {
+          const spot = await pageAgent(tabId, 'prepare', params.ref);
+          await pageAgent(tabId, 'showCursor', { x: spot.x, y: spot.y });
+          await pageAgent(tabId, 'focusTarget', params.ref);
+          await pageAgent(tabId, 'cursorPulse', { x: spot.x, y: spot.y });
+        }
         await press(tabId, params.key);
         return { pressed: true };
       case 'navigate':
