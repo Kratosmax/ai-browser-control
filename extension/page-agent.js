@@ -159,31 +159,35 @@
     };
   }
 
-  // —— 可视光标：仅在写入操作时出现。纯 transform/opacity 合成器动画，
-  // 无事件监听器、无轮询，pointer-events:none，不影响页面交互与性能。
-  // 操作停止 2.5 秒后光标自动淡出，不残留屏幕。——
+  // —— 可视光标：弹簧物理驱动（Codex 同款机制）。
+  // rAF 循环仅在弹簧未收敛时运行；MutationObserver 在宿主被页面清理后自动重挂；
+  // 读取操作不出现光标。操作停止 hideAfterMs 后光标自动淡出（弹窗可配 0-60 秒）。——
   let cursorHost = null;
   let cursorShadow = null;
-  let cursorSeen = false;
   let hideTimer = null;
-  let hideAfterMs = 10000;   // 每次操作随命令下发（0-60000ms），由扩展弹窗配置
-  // 光标当前逻辑位置：宿主被页面重建后也能从正确位置继续平滑动画
-  let curX = -100;
-  let curY = -100;
+  let hideAfterMs = 10000;   // 弹窗配置：0-60 秒
+  let hideAt = Infinity;     // performance.now 时间戳；到点后可见度弹簧收敛到 0
+  let overlayRaf = null;
+  let overlayLast = 0;
+  // 弹簧状态：cur 当前值 / v 速度 / target 目标
+  const sp = {
+    x:   { cur: -100, v: 0, target: -100, k: 170, d: 26 },
+    y:   { cur: -100, v: 0, target: -100, k: 170, d: 26 },
+    vis: { cur: 0,    v: 0, target: 0,    k: 90,  d: 22 }
+  };
 
   function ensureCursor() {
-    // 注意：closed 模式下 host.shadowRoot 恒为 null，必须持有 ShadowRoot 引用。
     if (cursorHost && cursorShadow && cursorHost.isConnected) return cursorShadow;
     const host = document.createElement('div');
-    host.style.cssText = 'position:fixed;top:0;left:0;width:0;height:0;z-index:2147483647;pointer-events:none';
+    host.style.cssText = 'all:initial;position:fixed;inset:0;z-index:2147483647;pointer-events:none';
     const shadow = host.attachShadow({ mode: 'closed' });
     shadow.innerHTML = `<style>
-      #c { position: fixed; top: 0; left: 0; width: 26px; height: 26px; opacity: .96;
-           will-change: transform; transition: transform 600ms cubic-bezier(.45,.05,.25,1);
-           filter: drop-shadow(0 1px 3px rgba(0,0,0,.5)); }
-      #c.first { transition: none; }
-      #t { position: absolute; left: -1px; top: -1px; width: 13px; height: 13px; border-radius: 50%;
-           background: rgba(37,99,235,.9); box-shadow: 0 0 10px rgba(37,99,235,.75); }
+      #layer { position: fixed; inset: 0; }
+      #cursor { position: fixed; top: 0; left: 0; width: 26px; height: 26px;
+                will-change: transform, opacity; transform-origin: 0 0; }
+      #ball { position: absolute; left: -2px; top: -2px; width: 13px; height: 13px;
+              border-radius: 50%; background: rgba(37,99,235,.9);
+              box-shadow: 0 0 10px rgba(37,99,235,.75); }
       #f { position: fixed; width: 20px; height: 20px; margin: -10px 0 0 -10px; border-radius: 50%;
            background: rgba(37,99,235,.8); opacity: 0; will-change: transform, opacity; }
       #f.play { animation: ab-flash 350ms ease-out forwards; }
@@ -194,82 +198,82 @@
       @keyframes ab-flash { from { transform: scale(.5); opacity: .9; } to { transform: scale(2.2); opacity: 0; } }
       @keyframes ab-ripple { from { transform: scale(.35); opacity: .95; } to { transform: scale(3.4); opacity: 0; } }
     </style>
-    <div id="c">
-      <div id="t"></div>
-      <svg width="26" height="26" viewBox="0 0 24 24">
-        <path d="M5 2 L19 12.5 L11.8 13.6 L8.6 20.5 Z" fill="rgba(17,24,39,.85)" stroke="#fff" stroke-width="1.6"/>
-      </svg>
+    <div id="layer">
+      <div id="cursor">
+        <div id="ball"></div>
+        <svg width="26" height="26" viewBox="0 0 24 24">
+          <path d="M5 2 L19 12.5 L11.8 13.6 L8.6 20.5 Z" fill="rgba(17,24,39,.85)" stroke="#fff" stroke-width="1.6"/>
+        </svg>
+      </div>
     </div>
     <div id="f"></div><div id="r"></div>`;
     document.documentElement.appendChild(host);
     cursorHost = host;
     cursorShadow = shadow;
-    cursorSeen = false;
+    // 宿主被页面清理时自动重挂（Codex Q/T 同款机制）：弹簧状态保留，光标无感恢复
+    const mo = new MutationObserver(() => {
+      if (cursorHost && !cursorHost.isConnected) document.documentElement.appendChild(cursorHost);
+    });
+    mo.observe(document.documentElement, { childList: true });
     return shadow;
+  }
+
+  function wake() {
+    if (overlayRaf == null) {
+      overlayLast = performance.now();
+      overlayRaf = requestAnimationFrame(loop);
+    }
+  }
+
+  function loop(now) {
+    const dt = Math.min(0.032, Math.max(0.001, (now - overlayLast) / 1000));
+    overlayLast = now;
+    if (performance.now() >= hideAt) sp.vis.target = 0;
+    for (const s of [sp.x, sp.y, sp.vis]) {
+      s.v += (s.k * (s.target - s.cur) - s.d * s.v) * dt;
+      s.cur += s.v * dt;
+    }
+    const cursor = cursorShadow.getElementById('cursor');
+    cursor.style.transform = `translate3d(${sp.x.cur - 3}px, ${sp.y.cur - 3}px, 0)`;
+    cursorHost.style.opacity = String(Math.min(1, Math.max(0, sp.vis.cur)).toFixed(3));
+    const settled = Math.abs(sp.x.cur - sp.x.target) < 0.5 && Math.abs(sp.x.v) < 0.05 &&
+                    Math.abs(sp.y.cur - sp.y.target) < 0.5 && Math.abs(sp.y.v) < 0.05 &&
+                    Math.abs(sp.vis.cur - sp.vis.target) < 0.01 && Math.abs(sp.vis.v) < 0.01 &&
+                    performance.now() >= hideAt;
+    if (settled) { overlayRaf = null; return; }   // 全部收敛且已过淡出时间：停帧省电
+    overlayRaf = requestAnimationFrame(loop);
   }
 
   async function showCursor(point) {
     const shadow = ensureCursor();
-    const cursor = shadow.getElementById('c');
-    const flash = shadow.getElementById('f');
-    const ripple = shadow.getElementById('r');
     clearTimeout(hideTimer);
-    cursorHost.style.opacity = '1';
-    if (Number.isInteger(point.hideMs) && point.hideMs >= 0 && point.hideMs <= 60000) hideAfterMs = point.hideMs;
-    const to = { x: point.x - 3, y: point.y - 3 };
-    if (!cursorSeen) {
-      // 首次出现：直接出现在目标点
-      cursor.style.transform = `translate(${to.x}px, ${to.y}px)`;
-    } else if (document.visibilityState === 'visible') {
-      // rAF 逐帧插值：800ms 慢速滑行 + 移动中放大 1.2 倍——肉眼明确可见
-      const from = { x: curX, y: curY };
-      await new Promise((resolve) => {
-        const start = performance.now();
-        const duration = 800;
-        const step = (now) => {
-          const t = Math.min(1, (now - start) / duration);
-          const ease = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-          const x = from.x + (to.x - from.x) * ease;
-          const y = from.y + (to.y - from.y) * ease;
-          const scale = (1 + 0.22 * Math.sin(Math.PI * Math.min(1, t))).toFixed(3);
-          cursor.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
-          if (t < 1) requestAnimationFrame(step); else resolve();
-        };
-        requestAnimationFrame(step);
-      });
-    } else {
-      // 后台标签页（不可见）：直接落位，无动画必要
-      cursor.style.transform = `translate(${to.x}px, ${to.y}px)`;
-    }
-    curX = to.x;
-    curY = to.y;
-    flash.style.left = `${to.x + 3}px`;
-    flash.style.top = `${to.y + 3}px`;
-    ripple.style.left = `${to.x + 3}px`;
-    ripple.style.top = `${to.y + 3}px`;
+    hideAt = Infinity;                            // 移动期间不淡出
+    sp.x.target = point.x - 3;
+    sp.y.target = point.y - 3;
+    sp.vis.target = 1;
+    wake();
+    await new Promise(r => setTimeout(r, 320));   // 等弹簧基本到位（点击与视觉同步）
     return { shown: true };
   }
 
   function cursorPulse(point) {
     const shadow = ensureCursor();
-    const flash = shadow.getElementById('f');
-    const ripple = shadow.getElementById('r');
-    if (Number.isInteger(point.hideMs) && point.hideMs >= 0 && point.hideMs <= 60000) hideAfterMs = point.hideMs;
+    clearTimeout(hideTimer);
+    hideAt = performance.now() + hideAfterMs;
+    if (hideAfterMs <= 0) { sp.vis.cur = 0; sp.vis.v = 0; }   // 0 秒：运动完立即消失
+    const flash = cursorShadow.getElementById('f');
     flash.style.left = `${point.x}px`;
     flash.style.top = `${point.y}px`;
     flash.classList.remove('play');
-    void flash.offsetWidth;                         // 重启动画
+    void flash.offsetWidth;
     flash.classList.add('play');                    // 点击闪光
+    const ripple = cursorShadow.getElementById('r');
+    ripple.style.left = `${point.x}px`;
+    ripple.style.top = `${point.y}px`;
     ripple.classList.remove('play');
     void ripple.offsetWidth;
     ripple.classList.add('play');                   // 点击涟漪
-    // 消失延时由弹窗配置（0=运动完立即消失，默认 10s，上限 60s）
-    clearTimeout(hideTimer);
-    if (hideAfterMs <= 0) {
-      if (cursorHost) cursorHost.style.opacity = '0';
-    } else {
-      hideTimer = setTimeout(() => { if (cursorHost) cursorHost.style.opacity = '0'; }, hideAfterMs);
-    }
+    wake();
     return { pulsed: true };
   }
 
