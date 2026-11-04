@@ -159,22 +159,15 @@
     };
   }
 
-  // —— 可视光标：弹簧物理驱动（Codex 同款机制）。
-  // rAF 循环仅在弹簧未收敛时运行；MutationObserver 在宿主被页面清理后自动重挂；
-  // 读取操作不出现光标。操作停止 hideAfterMs 后光标自动淡出（弹窗可配 0-60 秒）。——
+  // —— 可视光标：Web Animations API 驱动。
+  // 显式关键帧 + 合成器动画：不依赖 CSS transition / rAF / 前后计算样式，
+  // 任何页面任何负载下中间帧必然渲染。操作停止后自动淡出（弹窗可配 0-60 秒）。——
   let cursorHost = null;
   let cursorShadow = null;
   let hideTimer = null;
   let hideAfterMs = 10000;   // 弹窗配置：0-60 秒
-  let hideAt = Infinity;     // performance.now 时间戳；到点后可见度弹簧收敛到 0
-  let overlayRaf = null;
-  let overlayLast = 0;
-  // 弹簧状态：cur 当前值 / v 速度 / target 目标
-  const sp = {
-    x:   { cur: -100, v: 0, target: -100, k: 170, d: 26 },
-    y:   { cur: -100, v: 0, target: -100, k: 170, d: 26 },
-    vis: { cur: 0,    v: 0, target: 0,    k: 90,  d: 22 }
-  };
+  let cursorX = -100, cursorY = -100;
+  let cursorSeen = false;
 
   function ensureCursor() {
     if (cursorHost && cursorShadow && cursorHost.isConnected) return cursorShadow;
@@ -183,20 +176,14 @@
     const shadow = host.attachShadow({ mode: 'closed' });
     shadow.innerHTML = `<style>
       #layer { position: fixed; inset: 0; }
-      #cursor { position: fixed; top: 0; left: 0; width: 26px; height: 26px;
-                will-change: transform, opacity; transform-origin: 0 0; }
+      #cursor { position: fixed; top: 0; left: 0; width: 26px; height: 26px; will-change: transform; }
       #ball { position: absolute; left: -2px; top: -2px; width: 13px; height: 13px;
               border-radius: 50%; background: rgba(37,99,235,.9);
               box-shadow: 0 0 10px rgba(37,99,235,.75); }
       #f { position: fixed; width: 20px; height: 20px; margin: -10px 0 0 -10px; border-radius: 50%;
-           background: rgba(37,99,235,.8); opacity: 0; will-change: transform, opacity; }
-      #f.play { animation: ab-flash 350ms ease-out forwards; }
+           background: rgba(37,99,235,.8); opacity: 0; }
       #r { position: fixed; width: 22px; height: 22px; margin: -11px 0 0 -11px;
-           border: 3px solid rgba(37,99,235,.9); border-radius: 50%; opacity: 0;
-           will-change: transform, opacity; }
-      #r.play { animation: ab-ripple 720ms cubic-bezier(.2,.6,.35,1) forwards; }
-      @keyframes ab-flash { from { transform: scale(.5); opacity: .9; } to { transform: scale(2.2); opacity: 0; } }
-      @keyframes ab-ripple { from { transform: scale(.35); opacity: .95; } to { transform: scale(3.4); opacity: 0; } }
+           border: 3px solid rgba(37,99,235,.9); border-radius: 50%; opacity: 0; }
     </style>
     <div id="layer">
       <div id="cursor">
@@ -210,7 +197,6 @@
     document.documentElement.appendChild(host);
     cursorHost = host;
     cursorShadow = shadow;
-    // 宿主被页面清理时自动重挂（Codex Q/T 同款机制）：弹簧状态保留，光标无感恢复
     const mo = new MutationObserver(() => {
       if (cursorHost && !cursorHost.isConnected) document.documentElement.appendChild(cursorHost);
     });
@@ -218,62 +204,49 @@
     return shadow;
   }
 
-  function wake() {
-    if (overlayRaf == null) {
-      overlayLast = performance.now();
-      overlayRaf = requestAnimationFrame(loop);
-    }
-  }
-
-  function loop(now) {
-    const dt = Math.min(0.032, Math.max(0.001, (now - overlayLast) / 1000));
-    overlayLast = now;
-    if (performance.now() >= hideAt) sp.vis.target = 0;
-    for (const s of [sp.x, sp.y, sp.vis]) {
-      s.v += (s.k * (s.target - s.cur) - s.d * s.v) * dt;
-      s.cur += s.v * dt;
-    }
-    const cursor = cursorShadow.getElementById('cursor');
-    cursor.style.transform = `translate3d(${sp.x.cur - 3}px, ${sp.y.cur - 3}px, 0)`;
-    cursorHost.style.opacity = String(Math.min(1, Math.max(0, sp.vis.cur)).toFixed(3));
-    const settled = Math.abs(sp.x.cur - sp.x.target) < 0.5 && Math.abs(sp.x.v) < 0.05 &&
-                    Math.abs(sp.y.cur - sp.y.target) < 0.5 && Math.abs(sp.y.v) < 0.05 &&
-                    Math.abs(sp.vis.cur - sp.vis.target) < 0.01 && Math.abs(sp.vis.v) < 0.01 &&
-                    performance.now() >= hideAt;
-    if (settled) { overlayRaf = null; return; }   // 全部收敛且已过淡出时间：停帧省电
-    overlayRaf = requestAnimationFrame(loop);
-  }
-
   async function showCursor(point) {
     const shadow = ensureCursor();
     clearTimeout(hideTimer);
-    hideAt = Infinity;                            // 移动期间不淡出
-    sp.x.target = point.x - 3;
-    sp.y.target = point.y - 3;
-    sp.vis.target = 1;
-    wake();
-    await new Promise(r => setTimeout(r, 320));   // 等弹簧基本到位（点击与视觉同步）
+    cursorHost.style.opacity = '1';
+    const cursor = shadow.getElementById('cursor');
+    const flash = shadow.getElementById('f');
+    const to = { x: point.x - 3, y: point.y - 3 };
+    const from = cursorSeen ? { x: cursorX, y: cursorY } : to;
+    cursorSeen = true;
+    cursorX = to.x; cursorY = to.y;
+    // WAAPI：显式关键帧，合成器驱动，不依赖 rAF/CSS transition/前后计算样式
+    cursor.animate(
+      [
+        { transform: `translate(${from.x}px, ${from.y}px)` },
+        { transform: `translate(${to.x}px, ${to.y}px)` }
+      ],
+      { duration: 500, easing: 'cubic-bezier(.4, 0, .2, 1)', fill: 'forwards' }
+    );
+    flash.style.left = `${to.x + 3}px`;
+    flash.style.top = `${to.y + 3}px`;
+    await new Promise(r => setTimeout(r, 500));   // 等动画完成（点击与视觉同步）
     return { shown: true };
   }
 
   function cursorPulse(point) {
     const shadow = ensureCursor();
     clearTimeout(hideTimer);
-    hideAt = performance.now() + hideAfterMs;
-    if (hideAfterMs <= 0) { sp.vis.cur = 0; sp.vis.v = 0; }   // 0 秒：运动完立即消失
     const flash = cursorShadow.getElementById('f');
     flash.style.left = `${point.x}px`;
     flash.style.top = `${point.y}px`;
-    flash.classList.remove('play');
-    void flash.offsetWidth;
-    flash.classList.add('play');                    // 点击闪光
+    flash.animate(
+      [{ transform: 'scale(.5)', opacity: .85 }, { transform: 'scale(2.2)', opacity: 0 }],
+      { duration: 350, easing: 'ease-out', fill: 'forwards' }
+    );
     const ripple = cursorShadow.getElementById('r');
     ripple.style.left = `${point.x}px`;
     ripple.style.top = `${point.y}px`;
-    ripple.classList.remove('play');
-    void ripple.offsetWidth;
-    ripple.classList.add('play');                   // 点击涟漪
-    wake();
+    ripple.animate(
+      [{ transform: 'scale(.35)', opacity: .95 }, { transform: 'scale(3.4)', opacity: 0 }],
+      { duration: 650, easing: 'cubic-bezier(.2,.6,.35,1)', fill: 'forwards' }
+    );
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(() => { cursorHost.style.opacity = '0'; }, hideAfterMs);
     return { pulsed: true };
   }
 
