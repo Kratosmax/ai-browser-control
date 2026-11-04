@@ -166,6 +166,7 @@
   let cursorShadow = null;
   let cursorSeen = false;
   let hideTimer = null;
+  let hideAfterMs = 10000;   // 每次操作随命令下发（0-60000ms），由扩展弹窗配置
 
   function ensureCursor() {
     // 注意：closed 模式下 host.shadowRoot 恒为 null，必须持有 ShadowRoot 引用。
@@ -209,6 +210,7 @@
     const ripple = shadow.getElementById('r');
     clearTimeout(hideTimer);
     cursorHost.style.opacity = '1';
+    if (Number.isInteger(point.hideMs) && point.hideMs >= 0 && point.hideMs <= 60000) hideAfterMs = point.hideMs;
     if (!cursorSeen) {
       cursor.classList.add('first');   // 首次出现直接落在目标点，不从 (0,0) 飞过来
       trail.classList.add('first');
@@ -231,6 +233,7 @@
     const shadow = ensureCursor();
     const flash = shadow.getElementById('f');
     const ripple = shadow.getElementById('r');
+    if (Number.isInteger(point.hideMs) && point.hideMs >= 0 && point.hideMs <= 60000) hideAfterMs = point.hideMs;
     flash.style.left = `${point.x}px`;
     flash.style.top = `${point.y}px`;
     flash.classList.remove('play');
@@ -239,9 +242,13 @@
     ripple.classList.remove('play');
     void ripple.offsetWidth;
     ripple.classList.add('play');                   // 点击涟漪
-    // 2.5 秒无操作后光标淡出，不残留屏幕
+    // 消失延时由弹窗配置（0=运动完立即消失，默认 10s，上限 60s）
     clearTimeout(hideTimer);
-    hideTimer = setTimeout(() => { if (cursorHost) cursorHost.style.opacity = '0'; }, 2500);
+    if (hideAfterMs <= 0) {
+      if (cursorHost) cursorHost.style.opacity = '0';
+    } else {
+      hideTimer = setTimeout(() => { if (cursorHost) cursorHost.style.opacity = '0'; }, hideAfterMs);
+    }
     return { pulsed: true };
   }
 

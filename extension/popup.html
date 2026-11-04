@@ -47,6 +47,11 @@
         <input id="cdp-enabled" type="checkbox">
       </label>
       <p class="hint">读取（snapshot）不使用 CDP，任何站点都无提示条。</p>
+      <label class="field-label" for="cursor-hide">光标消失延时（秒，0 = 立即，最长 60）</label>
+      <div class="actions">
+        <input id="cursor-hide" type="number" min="0" max="60" placeholder="10">
+        <button id="save-hide" type="button" class="ghost">保存</button>
+      </div>
       <label class="field-label" for="bridge-port">本机桥端口</label>
       <div class="actions">
         <input id="bridge-port" type="number" min="1" max="65535" placeholder="17653">

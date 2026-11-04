@@ -322,6 +322,18 @@ test('页面代理返回 null 或携带 error 时，报告真实原因而非解�
   await assert.rejects(run("execute({method:'snapshot',params:{tabId:7}})"), /目标中心被其他元素遮挡/);
 });
 
+test('光标消失延时：0-60 秒校验、持久化并可随命令下发', async () => {
+  const { calls, run } = backgroundHarness();
+  await tick();
+  await assert.rejects(run("handlePopup({type:'set_cursor_hide',seconds:61})"), /0-60/);
+  await assert.rejects(run("handlePopup({type:'set_cursor_hide',seconds:-1})"), /0-60/);
+  const st = await run("handlePopup({type:'set_cursor_hide',seconds:10})");
+  assert.equal(st.cursorHideSec, 10);
+  assert(calls.some((c) => c[0] === 'store' && c[1].cursorHideSec === 10));
+  const status = await run("handlePopup({type:'popup_status'})");
+  assert.equal(status.cursorHideSec, 10);
+});
+
 test('CDP 开关：关闭后写入拒绝、读取照常，重新开启恢复', async () => {
   const { calls, run } = backgroundHarness();
   await tick();

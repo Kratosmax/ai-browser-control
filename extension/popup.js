@@ -11,6 +11,8 @@ const autoAuthorize = document.getElementById('auto-authorize');
 const cdpEnabled = document.getElementById('cdp-enabled');
 const bridgePortInput = document.getElementById('bridge-port');
 const savePortButton = document.getElementById('save-port');
+const cursorHideInput = document.getElementById('cursor-hide');
+const saveHideButton = document.getElementById('save-hide');
 const message = document.getElementById('message');
 let busy = false;
 let refreshPromise = null;
@@ -60,6 +62,7 @@ function refresh() {
     autoAuthorize.checked = state.autoAuthorize === true;
     cdpEnabled.checked = state.cdpEnabled !== false;
     if (document.activeElement !== bridgePortInput) bridgePortInput.value = state.bridgePort;
+    if (document.activeElement !== cursorHideInput) cursorHideInput.value = state.cursorHideSec;
     renderTab(state, tab);
     savePortButton.disabled = busy;
   })().finally(() => { refreshPromise = null; });
@@ -115,6 +118,15 @@ cdpEnabled.addEventListener('change', () => {
     message.textContent = state.cdpEnabled
       ? '已开启 CDP 写入：点击/输入/截屏可用，写入时会出现提示条。'
       : '已关闭 CDP 写入：点击/输入/截屏将拒绝执行，纯读取照常可用。';
+  });
+});
+
+saveHideButton.addEventListener('click', () => {
+  void act(async () => {
+    const state = await send('set_cursor_hide', { seconds: Number(cursorHideInput.value) });
+    message.textContent = state.cursorHideSec === 0
+      ? '光标将在每次移动结束的瞬间消失。'
+      : `光标将在操作 ${state.cursorHideSec} 秒后淡出。`;
   });
 });
 

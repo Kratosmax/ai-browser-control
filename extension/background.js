@@ -9,6 +9,8 @@ const completed = new Map();
 let autoAuthorize = false;
 // CDP 写入开关（点击/输入/截屏需要调试器；关闭后这些命令直接拒绝，读取不受影响）。
 let cdpEnabled = true;
+// 光标消失延时（毫秒）：由弹窗配置（0-60 秒），随每次写入命令下发到页面代理。
+let cursorHideMs = 10000;
 // 桥端口存扩展存储，弹窗可改；默认 17653 与 install.mjs 的首选端口一致。
 let bridgePort = 17653;
 // 配对状态只在内存里；service worker 重启后重新 /pair，同 ID 幂等。
@@ -31,9 +33,12 @@ function loopSleep(ms) {
   });
 }
 
-const ready = chrome.storage.local.get(['autoAuthorize', 'bridgePort', 'cdpEnabled']).then((stored) => {
+const ready = chrome.storage.local.get(['autoAuthorize', 'bridgePort', 'cdpEnabled', 'cursorHideSec']).then((stored) => {
   autoAuthorize = stored.autoAuthorize === true;
   cdpEnabled = stored.cdpEnabled !== false;
+  cursorHideMs = Number.isInteger(stored.cursorHideSec) && stored.cursorHideSec >= 0 && stored.cursorHideSec <= 60
+    ? stored.cursorHideSec * 1000
+    : 10000;
   bridgePort = Number.isInteger(stored.bridgePort) && stored.bridgePort > 0 && stored.bridgePort < 65536 ? stored.bridgePort : 17653;
 });
 
@@ -213,30 +218,30 @@ async function execute(command) {
         return pageAgent(tabId, 'snapshot');
       case 'click': {
         const { x, y } = await pageAgent(tabId, 'prepare', params.ref);
-        await pageAgent(tabId, 'showCursor', { x, y });          // 光标滑动到目标（210ms，与视觉同步）
+        await pageAgent(tabId, 'showCursor', { x, y, hideMs: cursorHideMs });   // 光标滑动到目标（600ms，与视觉同步）
         await cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
         await cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
-        await pageAgent(tabId, 'cursorPulse', { x, y });         // 点击涟漪动画
+        await pageAgent(tabId, 'cursorPulse', { x, y, hideMs: cursorHideMs });   // 点击闪光+涟漪，并按配置调度淡出
         await cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
         return { clicked: true };
       }
       case 'fill':
         if (typeof params.text !== 'string') throw new Error('text 必须是字符串');
         const spot = await pageAgent(tabId, 'prepare', params.ref);
-        await pageAgent(tabId, 'showCursor', { x: spot.x, y: spot.y });
+        await pageAgent(tabId, 'showCursor', { x: spot.x, y: spot.y, hideMs: cursorHideMs });
         await pageAgent(tabId, 'focus', params.ref);
         await press(tabId, 'Control+A');
         if (params.text === '') await press(tabId, 'Backspace');
         else await cdp(tabId, 'Input.insertText', { text: params.text });
-        await pageAgent(tabId, 'cursorPulse', { x: spot.x, y: spot.y });
+        await pageAgent(tabId, 'cursorPulse', { x: spot.x, y: spot.y, hideMs: cursorHideMs });
         return { filled: true };
       case 'press':
         // 带 ref 时先定位并展示光标，再聚焦目标；不触发点击或表单提交。
         if (params.ref !== undefined) {
           const spot = await pageAgent(tabId, 'prepare', params.ref);
-          await pageAgent(tabId, 'showCursor', { x: spot.x, y: spot.y });
+          await pageAgent(tabId, 'showCursor', { x: spot.x, y: spot.y, hideMs: cursorHideMs });
           await pageAgent(tabId, 'focusTarget', params.ref);
-          await pageAgent(tabId, 'cursorPulse', { x: spot.x, y: spot.y });
+          await pageAgent(tabId, 'cursorPulse', { x: spot.x, y: spot.y, hideMs: cursorHideMs });
         }
         await press(tabId, params.key);
         return { pressed: true };
@@ -374,7 +379,14 @@ async function handlePopup(message) {
   await ready;
   switch (message.type) {
     case 'popup_status':
-      return { bridgeState, connected: !wantDisconnect && (bridgeState === '已连接' || bridgeState === '等待本机桥命令'), autoAuthorize, cdpEnabled, bridgePort, authorizedTabIds: [...authorized] };
+      return { bridgeState, connected: !wantDisconnect && (bridgeState === '已连接' || bridgeState === '等待本机桥命令'), autoAuthorize, cdpEnabled, cursorHideSec: Math.round(cursorHideMs / 1000), bridgePort, authorizedTabIds: [...authorized] };
+    case 'set_cursor_hide': {
+      const sec = message.seconds;
+      if (!Number.isInteger(sec) || sec < 0 || sec > 60) throw new Error('光标消失延时必须是 0-60 的整数秒');
+      cursorHideMs = sec * 1000;
+      await chrome.storage.local.set({ cursorHideSec: sec });
+      return { cursorHideSec: sec };
+    }
     case 'set_cdp_enabled': {
       cdpEnabled = message.enabled !== false;
       await chrome.storage.local.set({ cdpEnabled });
