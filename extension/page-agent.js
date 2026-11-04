@@ -162,10 +162,12 @@
   // —— 可视光标：仅在写入操作时出现。纯 transform/opacity 合成器动画，
   // 无事件监听器、无定时器、pointer-events:none，不影响页面交互与性能。——
   let cursorHost = null;
+  let cursorShadow = null;
   let cursorSeen = false;
 
   function ensureCursor() {
-    if (cursorHost && cursorHost.isConnected) return cursorHost.shadowRoot;
+    // 注意：closed 模式下 host.shadowRoot 恒为 null，必须持有 ShadowRoot 引用。
+    if (cursorHost && cursorShadow && cursorHost.isConnected) return cursorShadow;
     const host = document.createElement('div');
     host.style.cssText = 'position:fixed;top:0;left:0;width:0;height:0;z-index:2147483647;pointer-events:none';
     const shadow = host.attachShadow({ mode: 'closed' });
@@ -186,6 +188,8 @@
     <div id="r"></div>`;
     document.documentElement.appendChild(host);
     cursorHost = host;
+    cursorShadow = shadow;
+    cursorSeen = false;
     return shadow;
   }
 
