@@ -8,6 +8,7 @@ const tabStatus = document.getElementById('tab-status');
 const authorizeButton = document.getElementById('authorize');
 const releaseButton = document.getElementById('release');
 const autoAuthorize = document.getElementById('auto-authorize');
+const cdpEnabled = document.getElementById('cdp-enabled');
 const bridgePortInput = document.getElementById('bridge-port');
 const savePortButton = document.getElementById('save-port');
 const message = document.getElementById('message');
@@ -57,6 +58,7 @@ function refresh() {
     const [state, tab] = await Promise.all([send('popup_status'), currentTab()]);
     renderConnection(state);
     autoAuthorize.checked = state.autoAuthorize === true;
+    cdpEnabled.checked = state.cdpEnabled !== false;
     if (document.activeElement !== bridgePortInput) bridgePortInput.value = state.bridgePort;
     renderTab(state, tab);
     savePortButton.disabled = busy;
@@ -104,6 +106,15 @@ autoAuthorize.addEventListener('change', () => {
     message.textContent = state.autoAuthorize
       ? '已开启自动授权：AI 可按需控制任意网页。'
       : '已关闭自动授权，回到手动逐页授权。';
+  });
+});
+
+cdpEnabled.addEventListener('change', () => {
+  void act(async () => {
+    const state = await send('set_cdp_enabled', { enabled: cdpEnabled.checked });
+    message.textContent = state.cdpEnabled
+      ? '已开启 CDP 写入：点击/输入/截屏可用，写入时会出现提示条。'
+      : '已关闭 CDP 写入：点击/输入/截屏将拒绝执行，纯读取照常可用。';
   });
 });
 

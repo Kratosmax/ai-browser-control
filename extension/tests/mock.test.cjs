@@ -170,17 +170,19 @@ test('一键配对、单轮询、25秒超时及结果重传不重复动作', asy
   calls.length = 0;
   await run("handlePopup({type:'connect'})");
   await tick();
-  assert.equal(pairs, 1);
-  // 后台循环停在断线重试的假定时器上；触发后恢复轮询并执行第一条指令
+  assert.ok(pairs >= 1 && pairs <= 2, 'connect 与循环的配对竞态合计 1-2 次');
+  // connect 唤醒退避中的循环：立即恢复轮询并执行第一条指令（含光标脚本注入）
+  assert.equal(polls, 1);
+  assert.equal(posts, 1);
+  assert.equal(calls.filter((c) => c[0] === 'cdp' && c[2].type === 'mousePressed').length, 1);
   const fire = (ms) => { for (const [id, timer] of [...timers]) if (timer.ms === ms) { timers.delete(id); timer.fn(); } };
   fire(2000);
   await tick();
-  assert.equal(polls, 1);
-  assert.equal(posts, 1);
   fire(2000);
   await tick();
-  // 断线重试会重新配对并重传结果，但点击动作只执行一次
-  assert.equal(pairs, 2);
+  // 重试周期的重复 /pair 幂等无害；断开后配对次数不再增长才是关键不变量
+  const pairsBeforeDisconnect = pairs;
+  assert.ok(pairsBeforeDisconnect >= 1 && pairsBeforeDisconnect <= 4);
   assert.equal(posts, 3);
   assert.equal(polls, 3);
   assert.equal(calls.filter((c) => c[0] === 'cdp' && c[2].type === 'mousePressed').length, 1);
@@ -188,8 +190,15 @@ test('一键配对、单轮询、25秒超时及结果重传不重复动作', asy
   await tick();
   assert.equal(polls, 3);
   assert([...timers.values()].some((timer) => timer.ms === 25000));
+  // 断开后循环空转待命：不再自动重新配对，状态保持已断开
   await run("handlePopup({type:'disconnect'})");
   await tick();
+  assert.equal(run("bridgeState"), '已断开');
+  await tick();
+  await tick();
+  assert.equal(pairs, pairsBeforeDisconnect, '断开后不自动重连');
+  assert.equal(run("bridgeState"), '已断开');
+  assert.equal(run("bridgeState"), '已断开');
 });
 
 function pageHarness() {
@@ -311,6 +320,22 @@ test('页面代理返回 null 或携带 error 时，报告真实原因而非解�
   await assert.rejects(run("execute({method:'click',params:{tabId:7,ref:'r1-1'}})"), /页面代理未返回结果/);
   mode = 'error';
   await assert.rejects(run("execute({method:'snapshot',params:{tabId:7}})"), /目标中心被其他元素遮挡/);
+});
+
+test('CDP 开关：关闭后写入拒绝、读取照常，重新开启恢复', async () => {
+  const { calls, run } = backgroundHarness();
+  await tick();
+  await run("handlePopup({type:'set_auto_authorize',enabled:true})");
+  await run("handlePopup({type:'set_cdp_enabled',enabled:false})");
+  await run("execute({method:'snapshot',params:{tabId:7}})");          // 读取不受影响
+  assert(!calls.some((c) => c[0] === 'attach'), '读取不附加调试器');
+  await assert.rejects(run("execute({method:'click',params:{tabId:7,ref:'r1-1'}})"), /CDP 写入已在扩展弹窗中关闭/);
+  await assert.rejects(run("execute({method:'screenshot',params:{tabId:7}})"), /CDP 写入已在扩展弹窗中关闭/);
+  await run("handlePopup({type:'set_cdp_enabled',enabled:true})");
+  await run("execute({method:'click',params:{tabId:7,ref:'r1-1'}})");
+  assert(calls.some((c) => c[0] === 'attach'), '重新开启后写入恢复');
+  const st = await run("handlePopup({type:'popup_status'})");
+  assert.equal(st.cdpEnabled, true);
 });
 
 test('桥端口可配置、失败按指数退避、成功归零', async () => {

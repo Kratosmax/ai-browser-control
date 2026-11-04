@@ -39,6 +39,14 @@
 
     <details id="advanced">
       <summary>高级设置</summary>
+      <label class="switch-row" for="cdp-enabled">
+        <span class="switch-copy">
+          <strong>启用 CDP 写入</strong>
+          <small>点击/输入/截屏需要调试器附着并出现提示条；关闭后这些操作将拒绝执行，纯读取不受影响</small>
+        </span>
+        <input id="cdp-enabled" type="checkbox">
+      </label>
+      <p class="hint">读取（snapshot）不使用 CDP，任何站点都无提示条。</p>
       <label class="field-label" for="bridge-port">本机桥端口</label>
       <div class="actions">
         <input id="bridge-port" type="number" min="1" max="65535" placeholder="17653">

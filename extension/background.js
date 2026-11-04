@@ -7,18 +7,33 @@ const attached = new Set();
 const tabQueues = new Map();
 const completed = new Map();
 let autoAuthorize = false;
+// CDP 写入开关（点击/输入/截屏需要调试器；关闭后这些命令直接拒绝，读取不受影响）。
+let cdpEnabled = true;
 // 桥端口存扩展存储，弹窗可改；默认 17653 与 install.mjs 的首选端口一致。
 let bridgePort = 17653;
 // 配对状态只在内存里；service worker 重启后重新 /pair，同 ID 幂等。
 let paired = false;
+// 用户显式断开后置真：轮询循环空转待命，不再自动重连，直到再次连接。
+let wantDisconnect = false;
 let loopPromise = null;
 let requestController = null;
 let pendingResult = null;
 let bridgeState = '未连接';
 let bridgeFailures = 0;
+// 唤醒轮询循环：连接/断开后立即生效，不等退避睡眠结束。
+let wakeLoop = null;
 
-const ready = chrome.storage.local.get(['autoAuthorize', 'bridgePort']).then((stored) => {
+function loopSleep(ms) {
+  return new Promise((resolve) => {
+    const done = () => { clearTimeout(timer); if (wakeLoop === done) wakeLoop = null; resolve(); };
+    const timer = setTimeout(done, ms);
+    wakeLoop = done;
+  });
+}
+
+const ready = chrome.storage.local.get(['autoAuthorize', 'bridgePort', 'cdpEnabled']).then((stored) => {
   autoAuthorize = stored.autoAuthorize === true;
+  cdpEnabled = stored.cdpEnabled !== false;
   bridgePort = Number.isInteger(stored.bridgePort) && stored.bridgePort > 0 && stored.bridgePort < 65536 ? stored.bridgePort : 17653;
 });
 
@@ -62,6 +77,7 @@ async function ensureAllowed(tabId) {
 // 写入类命令（点击/输入/截屏）才附加调试器；首次写入时才出现提示条。
 async function ensureAttached(tabId) {
   const tab = await ensureAllowed(tabId);
+  if (!cdpEnabled) throw new Error('CDP 写入已在扩展弹窗中关闭（高级设置），读取不受影响');
   if (!attached.has(tabId)) {
     await chrome.debugger.attach({ tabId }, '1.3');
     attached.add(tabId);
@@ -279,12 +295,18 @@ function remember(id, payload) {
   if (completed.size > 200) completed.delete(completed.keys().next().value);
 }
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms) => new Promise((resolve) => {
+  const done = () => { clearTimeout(timer); if (wakeLoop === done) wakeLoop = null; resolve(); };
+  const timer = setTimeout(done, ms);
+  wakeLoop = done;
+});
 
 async function pollLoop() {
   await ready;
   while (true) {
     const attempt = async () => {
+      // 用户显式断开后循环空转待命，不重新配对，直到再次连接。
+      if (wantDisconnect) { bridgeState = '已断开'; await sleep(800); return; }
       if (pendingResult) {
         const payload = pendingResult;
         try {
@@ -352,7 +374,12 @@ async function handlePopup(message) {
   await ready;
   switch (message.type) {
     case 'popup_status':
-      return { bridgeState, connected: bridgeState === '已连接' || bridgeState === '等待本机桥命令', autoAuthorize, bridgePort, authorizedTabIds: [...authorized] };
+      return { bridgeState, connected: !wantDisconnect && (bridgeState === '已连接' || bridgeState === '等待本机桥命令'), autoAuthorize, cdpEnabled, bridgePort, authorizedTabIds: [...authorized] };
+    case 'set_cdp_enabled': {
+      cdpEnabled = message.enabled !== false;
+      await chrome.storage.local.set({ cdpEnabled });
+      return { cdpEnabled };
+    }
     case 'set_bridge_port': {
       const port = message.port;
       if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('端口必须是 1-65535 的整数');
@@ -364,21 +391,28 @@ async function handlePopup(message) {
       return { bridgePort: port };
     }
     case 'connect':
+      wantDisconnect = false;
       paired = false;
       requestController?.abort();
+      wakeLoop?.();
       try {
         await ensurePaired();
       } catch (error) {
+        wakeLoop?.();
         if (!error?.status && /fetch/i.test(String(error?.message ?? ''))) {
           throw new Error('本机桥未运行。双击插件目录的“启动桥接服务.cmd”，或在 AI 助手里调用一次浏览器工具自动拉起。');
         }
         throw error;
       }
+      wakeLoop?.();   // 若循环还停在退避睡眠，立即唤醒进入轮询，状态/按钮即时刷新
       return { paired: true };
     case 'disconnect':
-      try { await bridgeFetch('/unpair', {}); } catch {}
+      wantDisconnect = true;   // 断开后循环空转待命，不自动重连
       paired = false;
-      bridgeState = '未连接';
+      requestController?.abort();
+      wakeLoop?.();
+      try { await bridgeFetch('/unpair', {}); } catch {}
+      bridgeState = '已断开';
       return { paired: false };
     case 'set_auto_authorize': {
       autoAuthorize = message.enabled === true;
