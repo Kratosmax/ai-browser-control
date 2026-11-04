@@ -179,9 +179,8 @@
            will-change: transform; transition: transform 600ms cubic-bezier(.45,.05,.25,1);
            filter: drop-shadow(0 1px 3px rgba(0,0,0,.5)); }
       #c.first { transition: none; }
-      #t { position: fixed; top: 0; left: 0; width: 14px; height: 14px; margin: -7px 0 0 -7px;
-           border-radius: 50%; background: rgba(37,99,235,.85); opacity: .85;
-           will-change: transform; transition: transform 600ms cubic-bezier(.45,.05,.25,1) 180ms; }
+      #t { position: absolute; left: -1px; top: -1px; width: 13px; height: 13px; border-radius: 50%;
+           background: rgba(37,99,235,.9); box-shadow: 0 0 10px rgba(37,99,235,.75); }
       #f { position: fixed; width: 20px; height: 20px; margin: -10px 0 0 -10px; border-radius: 50%;
            background: rgba(37,99,235,.8); opacity: 0; will-change: transform, opacity; }
       #f.play { animation: ab-flash 350ms ease-out forwards; }
@@ -192,10 +191,13 @@
       @keyframes ab-flash { from { transform: scale(.5); opacity: .9; } to { transform: scale(2.2); opacity: 0; } }
       @keyframes ab-ripple { from { transform: scale(.35); opacity: .95; } to { transform: scale(3.4); opacity: 0; } }
     </style>
-    <div id="c"><svg width="26" height="26" viewBox="0 0 24 24">
-      <path d="M5 2 L19 12.5 L11.8 13.6 L8.6 20.5 Z" fill="rgba(17,24,39,.85)" stroke="#fff" stroke-width="1.6"/>
-    </svg></div>
-    <div id="t"></div><div id="f"></div><div id="r"></div>`;
+    <div id="c">
+      <div id="t"></div>
+      <svg width="26" height="26" viewBox="0 0 24 24">
+        <path d="M5 2 L19 12.5 L11.8 13.6 L8.6 20.5 Z" fill="rgba(17,24,39,.85)" stroke="#fff" stroke-width="1.6"/>
+      </svg>
+    </div>
+    <div id="f"></div><div id="r"></div>`;
     document.documentElement.appendChild(host);
     cursorHost = host;
     cursorShadow = shadow;
@@ -206,23 +208,24 @@
   async function showCursor(point) {
     const shadow = ensureCursor();
     const cursor = shadow.getElementById('c');
-    const trail = shadow.getElementById('t');
+    const flash = shadow.getElementById('f');
     const ripple = shadow.getElementById('r');
     clearTimeout(hideTimer);
     cursorHost.style.opacity = '1';
     if (Number.isInteger(point.hideMs) && point.hideMs >= 0 && point.hideMs <= 60000) hideAfterMs = point.hideMs;
+    const target = `translate(${point.x - 3}px, ${point.y - 3}px)`;
     if (!cursorSeen) {
-      cursor.classList.add('first');   // 首次出现直接落在目标点，不从 (0,0) 飞过来
-      trail.classList.add('first');
+      // 首次出现：直接落在目标点（无过渡），强制重算后恢复过渡，后续移动平滑滑动
+      cursor.style.transition = 'none';
+      cursor.style.transform = target;
+      void cursor.offsetWidth;
+      cursor.style.transition = '';
       cursorSeen = true;
-    } else {
-      // 后续移动移除免过渡标记，光标与拖尾一起平滑滑动
-      cursor.classList.remove('first');
-      trail.classList.remove('first');
     }
-    cursor.style.transform = `translate(${point.x - 3}px, ${point.y - 3}px)`;
-    // 拖尾点延迟 180ms 跟随，形成肉眼可见的运动轨迹
-    setTimeout(() => { trail.style.transform = `translate(${point.x}px, ${point.y}px)`; }, 180);
+    // 拖尾光球内嵌在光标元素里，随同一个 transform 平滑移动——永不分离
+    cursor.style.transform = target;
+    flash.style.left = `${point.x}px`;
+    flash.style.top = `${point.y}px`;
     ripple.style.left = `${point.x}px`;
     ripple.style.top = `${point.y}px`;
     await new Promise((r) => setTimeout(r, 600));   // 等滑动完成（600ms 可见轨迹），与视觉同步后再点击
