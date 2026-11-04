@@ -213,6 +213,10 @@
       cursor.classList.add('first');   // 首次出现直接落在目标点，不从 (0,0) 飞过来
       trail.classList.add('first');
       cursorSeen = true;
+    } else {
+      // 后续移动移除免过渡标记，光标与拖尾一起平滑滑动
+      cursor.classList.remove('first');
+      trail.classList.remove('first');
     }
     cursor.style.transform = `translate(${point.x - 3}px, ${point.y - 3}px)`;
     // 拖尾点延迟 180ms 跟随，形成肉眼可见的运动轨迹
