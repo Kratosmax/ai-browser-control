@@ -208,7 +208,7 @@
     const trail = shadow.getElementById('t');
     const ripple = shadow.getElementById('r');
     clearTimeout(hideTimer);
-    host.style.opacity = '1';
+    cursorHost.style.opacity = '1';
     if (!cursorSeen) {
       cursor.classList.add('first');   // 首次出现直接落在目标点，不从 (0,0) 飞过来
       trail.classList.add('first');
