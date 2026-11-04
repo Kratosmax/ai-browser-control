@@ -167,6 +167,9 @@
   let cursorSeen = false;
   let hideTimer = null;
   let hideAfterMs = 10000;   // 每次操作随命令下发（0-60000ms），由扩展弹窗配置
+  // 光标当前逻辑位置：宿主被页面重建后也能从正确位置继续平滑动画
+  let curX = -100;
+  let curY = -100;
 
   function ensureCursor() {
     // 注意：closed 模式下 host.shadowRoot 恒为 null，必须持有 ShadowRoot 引用。
@@ -213,22 +216,37 @@
     clearTimeout(hideTimer);
     cursorHost.style.opacity = '1';
     if (Number.isInteger(point.hideMs) && point.hideMs >= 0 && point.hideMs <= 60000) hideAfterMs = point.hideMs;
-    const target = `translate(${point.x - 3}px, ${point.y - 3}px)`;
+    const to = { x: point.x - 3, y: point.y - 3 };
     if (!cursorSeen) {
-      // 首次出现：直接落在目标点（无过渡），强制重算后恢复过渡，后续移动平滑滑动
-      cursor.style.transition = 'none';
-      cursor.style.transform = target;
-      void cursor.offsetWidth;
-      cursor.style.transition = '';
-      cursorSeen = true;
+      // 首次出现：直接出现在目标点
+      cursor.style.transform = `translate(${to.x}px, ${to.y}px)`;
+    } else if (document.visibilityState === 'visible') {
+      // rAF 逐帧插值：从当前位置平滑滑动到目标（不依赖 CSS 过渡的前后样式，
+      // 页面重建/节点被清都不影响）；拖尾光球内嵌随行，永不分离
+      const from = { x: curX, y: curY };
+      await new Promise((resolve) => {
+        const start = performance.now();
+        const duration = 450;
+        const step = (now) => {
+          const t = Math.min(1, (now - start) / duration);
+          const ease = 1 - Math.pow(1 - t, 3);
+          const x = from.x + (to.x - from.x) * ease;
+          const y = from.y + (to.y - from.y) * ease;
+          cursor.style.transform = `translate(${x}px, ${y}px)`;
+          if (t < 1) requestAnimationFrame(step); else resolve();
+        };
+        requestAnimationFrame(step);
+      });
+    } else {
+      // 后台标签页（不可见）：直接落位，无动画必要
+      cursor.style.transform = `translate(${to.x}px, ${to.y}px)`;
     }
-    // 拖尾光球内嵌在光标元素里，随同一个 transform 平滑移动——永不分离
-    cursor.style.transform = target;
-    flash.style.left = `${point.x}px`;
-    flash.style.top = `${point.y}px`;
-    ripple.style.left = `${point.x}px`;
-    ripple.style.top = `${point.y}px`;
-    await new Promise((r) => setTimeout(r, 600));   // 等滑动完成（600ms 可见轨迹），与视觉同步后再点击
+    curX = to.x;
+    curY = to.y;
+    flash.style.left = `${to.x + 3}px`;
+    flash.style.top = `${to.y + 3}px`;
+    ripple.style.left = `${to.x + 3}px`;
+    ripple.style.top = `${to.y + 3}px`;
     return { shown: true };
   }
 
