@@ -221,18 +221,18 @@
       // 首次出现：直接出现在目标点
       cursor.style.transform = `translate(${to.x}px, ${to.y}px)`;
     } else if (document.visibilityState === 'visible') {
-      // rAF 逐帧插值：从当前位置平滑滑动到目标（不依赖 CSS 过渡的前后样式，
-      // 页面重建/节点被清都不影响）；拖尾光球内嵌随行，永不分离
+      // rAF 逐帧插值：800ms 慢速滑行 + 移动中放大 1.2 倍——肉眼明确可见
       const from = { x: curX, y: curY };
       await new Promise((resolve) => {
         const start = performance.now();
-        const duration = 450;
+        const duration = 800;
         const step = (now) => {
           const t = Math.min(1, (now - start) / duration);
-          const ease = 1 - Math.pow(1 - t, 3);
+          const ease = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
           const x = from.x + (to.x - from.x) * ease;
           const y = from.y + (to.y - from.y) * ease;
-          cursor.style.transform = `translate(${x}px, ${y}px)`;
+          const scale = (1 + 0.22 * Math.sin(Math.PI * Math.min(1, t))).toFixed(3);
+          cursor.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
           if (t < 1) requestAnimationFrame(step); else resolve();
         };
         requestAnimationFrame(step);
