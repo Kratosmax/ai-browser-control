@@ -160,10 +160,12 @@
   }
 
   // —— 可视光标：仅在写入操作时出现。纯 transform/opacity 合成器动画，
-  // 无事件监听器、无定时器、pointer-events:none，不影响页面交互与性能。——
+  // 无事件监听器、无轮询，pointer-events:none，不影响页面交互与性能。
+  // 操作停止 2.5 秒后光标自动淡出，不残留屏幕。——
   let cursorHost = null;
   let cursorShadow = null;
   let cursorSeen = false;
+  let hideTimer = null;
 
   function ensureCursor() {
     // 注意：closed 模式下 host.shadowRoot 恒为 null，必须持有 ShadowRoot 引用。
@@ -172,20 +174,27 @@
     host.style.cssText = 'position:fixed;top:0;left:0;width:0;height:0;z-index:2147483647;pointer-events:none';
     const shadow = host.attachShadow({ mode: 'closed' });
     shadow.innerHTML = `<style>
-      #c { position: fixed; top: 0; left: 0; width: 22px; height: 22px; opacity: .95;
-           will-change: transform; transition: transform 210ms cubic-bezier(.22,.61,.36,1);
-           filter: drop-shadow(0 1px 2px rgba(0,0,0,.45)); }
+      #c { position: fixed; top: 0; left: 0; width: 26px; height: 26px; opacity: .96;
+           will-change: transform; transition: transform 600ms cubic-bezier(.45,.05,.25,1);
+           filter: drop-shadow(0 1px 3px rgba(0,0,0,.5)); }
       #c.first { transition: none; }
-      #r { position: fixed; width: 14px; height: 14px; margin: -7px 0 0 -7px;
-           border: 2px solid rgba(37,99,235,.85); border-radius: 50%; opacity: 0;
+      #t { position: fixed; top: 0; left: 0; width: 14px; height: 14px; margin: -7px 0 0 -7px;
+           border-radius: 50%; background: rgba(37,99,235,.85); opacity: .85;
+           will-change: transform; transition: transform 600ms cubic-bezier(.45,.05,.25,1) 180ms; }
+      #f { position: fixed; width: 20px; height: 20px; margin: -10px 0 0 -10px; border-radius: 50%;
+           background: rgba(37,99,235,.8); opacity: 0; will-change: transform, opacity; }
+      #f.play { animation: ab-flash 350ms ease-out forwards; }
+      #r { position: fixed; width: 22px; height: 22px; margin: -11px 0 0 -11px;
+           border: 3px solid rgba(37,99,235,.9); border-radius: 50%; opacity: 0;
            will-change: transform, opacity; }
-      #r.play { animation: ab-ripple 450ms ease-out forwards; }
-      @keyframes ab-ripple { from { transform: scale(.45); opacity: .85; } to { transform: scale(3); opacity: 0; } }
+      #r.play { animation: ab-ripple 720ms cubic-bezier(.2,.6,.35,1) forwards; }
+      @keyframes ab-flash { from { transform: scale(.5); opacity: .9; } to { transform: scale(2.2); opacity: 0; } }
+      @keyframes ab-ripple { from { transform: scale(.35); opacity: .95; } to { transform: scale(3.4); opacity: 0; } }
     </style>
-    <div id="c"><svg width="22" height="22" viewBox="0 0 24 24">
-      <path d="M5 2 L19 12.5 L11.8 13.6 L8.6 20.5 Z" fill="rgba(17,24,39,.82)" stroke="#fff" stroke-width="1.5"/>
+    <div id="c"><svg width="26" height="26" viewBox="0 0 24 24">
+      <path d="M5 2 L19 12.5 L11.8 13.6 L8.6 20.5 Z" fill="rgba(17,24,39,.85)" stroke="#fff" stroke-width="1.6"/>
     </svg></div>
-    <div id="r"></div>`;
+    <div id="t"></div><div id="f"></div><div id="r"></div>`;
     document.documentElement.appendChild(host);
     cursorHost = host;
     cursorShadow = shadow;
@@ -196,26 +205,39 @@
   async function showCursor(point) {
     const shadow = ensureCursor();
     const cursor = shadow.getElementById('c');
+    const trail = shadow.getElementById('t');
     const ripple = shadow.getElementById('r');
+    clearTimeout(hideTimer);
+    host.style.opacity = '1';
     if (!cursorSeen) {
       cursor.classList.add('first');   // 首次出现直接落在目标点，不从 (0,0) 飞过来
+      trail.classList.add('first');
       cursorSeen = true;
     }
-    cursor.style.transform = `translate(${point.x - 2}px, ${point.y - 2}px)`;
+    cursor.style.transform = `translate(${point.x - 3}px, ${point.y - 3}px)`;
+    // 拖尾点延迟 180ms 跟随，形成肉眼可见的运动轨迹
+    setTimeout(() => { trail.style.transform = `translate(${point.x}px, ${point.y}px)`; }, 180);
     ripple.style.left = `${point.x}px`;
     ripple.style.top = `${point.y}px`;
-    await new Promise((r) => setTimeout(r, 210));   // 等滑动完成，与视觉同步后再点击
+    await new Promise((r) => setTimeout(r, 600));   // 等滑动完成（600ms 可见轨迹），与视觉同步后再点击
     return { shown: true };
   }
 
   function cursorPulse(point) {
     const shadow = ensureCursor();
+    const flash = shadow.getElementById('f');
     const ripple = shadow.getElementById('r');
-    ripple.style.left = `${point.x}px`;
-    ripple.style.top = `${point.y}px`;
+    flash.style.left = `${point.x}px`;
+    flash.style.top = `${point.y}px`;
+    flash.classList.remove('play');
+    void flash.offsetWidth;                         // 重启动画
+    flash.classList.add('play');                    // 点击闪光
     ripple.classList.remove('play');
-    void ripple.offsetWidth;                        // 重启动画
-    ripple.classList.add('play');
+    void ripple.offsetWidth;
+    ripple.classList.add('play');                   // 点击涟漪
+    // 2.5 秒无操作后光标淡出，不残留屏幕
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(() => { if (cursorHost) cursorHost.style.opacity = '0'; }, 2500);
     return { pulsed: true };
   }
 
