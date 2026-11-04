@@ -2,6 +2,8 @@
 
 const ALARM = 'zcode-bridge-wakeup';
 const authorized = new Set();
+// 已附加调试器的标签页：只有写入类命令（点击/输入/截屏）需要，读取不附加——无提示条、无 CDP 痕迹。
+const attached = new Set();
 const tabQueues = new Map();
 const completed = new Map();
 let autoAuthorize = false;
@@ -49,34 +51,37 @@ function withTab(tabId, action) {
   return next;
 }
 
-async function requireAuthorized(tabId) {
-  // 自动授权开启时按需附加；开关只由用户在弹窗更改，AI 无法自行打开。
-  if (!authorized.has(tabId)) {
-    if (!autoAuthorize) throw new Error('该标签页尚未手动授权');
-    const candidate = await chrome.tabs.get(tabId);
-    if (!isHttpUrl(candidate.url)) throw new Error('仅允许操作 HTTP(S) 标签页');
-    await chrome.debugger.attach({ tabId }, '1.3');
-    authorized.add(tabId);
-  }
+// 读取类命令（snapshot）只要求登记/自动授权，不附加调试器：无提示条、无 CDP 痕迹，反爬无感。
+async function ensureAllowed(tabId) {
   const tab = await chrome.tabs.get(tabId);
-  if (!authorized.has(tabId)) throw new Error('标签页授权已被撤销');
   if (!isHttpUrl(tab.url)) throw new Error('仅允许操作 HTTP(S) 标签页');
+  if (!authorized.has(tabId) && !autoAuthorize) throw new Error('该标签页尚未手动授权');
+  return tab;
+}
+
+// 写入类命令（点击/输入/截屏）才附加调试器；首次写入时才出现提示条。
+async function ensureAttached(tabId) {
+  const tab = await ensureAllowed(tabId);
+  if (!attached.has(tabId)) {
+    await chrome.debugger.attach({ tabId }, '1.3');
+    attached.add(tabId);
+  }
   return tab;
 }
 
 async function cdp(tabId, method, params = {}) {
-  await requireAuthorized(tabId);
+  await ensureAttached(tabId);
   return chrome.debugger.sendCommand({ tabId }, method, params);
 }
 
 async function pageAgent(tabId, operation, ref) {
-  await requireAuthorized(tabId);
+  await ensureAllowed(tabId);
   await chrome.scripting.executeScript({
     target: { tabId },
     world: 'ISOLATED',
     files: ['page-agent.js']
   });
-  await requireAuthorized(tabId);
+  await ensureAllowed(tabId);
   const results = await chrome.scripting.executeScript({
     target: { tabId },
     world: 'ISOLATED',
@@ -157,9 +162,11 @@ async function listTabs() {
 }
 
 async function release(tabId) {
-  if (!authorized.has(tabId)) throw new Error('该标签页尚未手动授权');
-  await chrome.debugger.detach({ tabId });
+  const tracked = authorized.has(tabId) || attached.has(tabId);
+  if (!tracked) throw new Error('该标签页尚未授权');
+  if (attached.has(tabId)) await chrome.debugger.detach({ tabId });
   authorized.delete(tabId);
+  attached.delete(tabId);
   return { released: true, tabId };
 }
 
@@ -178,7 +185,8 @@ async function execute(command) {
   return withTab(tabId, async () => {
     // 释放允许已导航到非 HTTP(S) 的授权页恢复正常状态。
     if (method === 'release') return release(tabId);
-    await requireAuthorized(tabId);
+    // snapshot（读取）走 ensureAllowed；写入类命令在首个 CDP 调用时经 ensureAttached 附加调试器。
+    await ensureAllowed(tabId);
     switch (method) {
       case 'snapshot':
         return pageAgent(tabId, 'snapshot');
@@ -366,10 +374,8 @@ async function handlePopup(message) {
       return withTab(message.tabId, async () => {
         const tab = await chrome.tabs.get(message.tabId);
         if (!isHttpUrl(tab.url)) throw new Error('只能授权 HTTP(S) 标签页');
-        if (!authorized.has(tab.id)) {
-          await chrome.debugger.attach({ tabId: tab.id }, '1.3');
-          authorized.add(tab.id);
-        }
+        // 只登记授权；调试器延迟到首个写入命令才附加（读取全程无提示条）。
+        authorized.add(tab.id);
         return { authorized: true, tabId: tab.id };
       });
     case 'release_tab':
@@ -389,7 +395,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 chrome.debugger.onDetach.addListener((source) => {
-  if (source.tabId !== undefined) authorized.delete(source.tabId);
+  if (source.tabId === undefined) return;
+  attached.delete(source.tabId);
+  // 手动模式下用户点提示条 × 视为撤销授权；自动模式下下次写入会自动重新附加。
+  if (!autoAuthorize) authorized.delete(source.tabId);
 });
 chrome.tabs.onRemoved.addListener((tabId) => authorized.delete(tabId));
 chrome.alarms.onAlarm.addListener((alarm) => {

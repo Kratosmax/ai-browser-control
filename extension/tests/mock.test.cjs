@@ -78,8 +78,7 @@ test('后台授权、全部方法、按键映射和撤销', async () => {
   await tick();
   assert.equal(calls.find((c) => c[0] === 'alarm')[1].periodInMinutes, 0.5);
   await assert.rejects(run("execute({method:'click',params:{tabId:7,ref:'r1-1'}})"), /未.*授权/);
-  await run("handlePopup({type:'authorize_tab',tabId:7})");
-  assert.equal(calls.find((c) => c[0] === 'attach')[2], '1.3');
+  await run("handlePopup({type:'authorize_tab',tabId:7})"); // 只登记授权，不附加调试器
   await assert.rejects(run("handlePopup({type:'authorize_tab',tabId:8})"), /HTTP/);
   const listed = await run("execute({method:'list_tabs'})");
   assert.equal(listed.length, 1);
@@ -89,6 +88,7 @@ test('后台授权、全部方法、按键映射和撤销', async () => {
   assert(calls.filter((c) => c[0] === 'script').every((c) => c[1].world === 'ISOLATED'));
   calls.length = 0;
   await run("execute({method:'click',params:{tabId:7,ref:'r1-1'}})");
+  assert.equal(calls.find((c) => c[0] === 'attach')[2], '1.3', '首次写入命令才附加调试器');
   assert.deepEqual(calls.filter((c) => c[0] === 'cdp').map((c) => c[2].type),
     ['mouseMoved', 'mousePressed', 'mouseReleased']);
   calls.length = 0;
@@ -124,7 +124,9 @@ test('自动授权按需附加调试、拒绝非 HTTP 页且可关闭', async ()
   const state = await run("handlePopup({type:'set_auto_authorize',enabled:true})");
   assert.equal(state.autoAuthorize, true);
   assert(calls.some((c) => c[0] === 'store' && c[1].autoAuthorize === true));
-  await run("execute({method:'snapshot',params:{tabId:7}})");
+  await run("execute({method:'snapshot',params:{tabId:7}})"); // 读取：不附加调试器
+  assert(!calls.some((c) => c[0] === 'attach'), '读取不应附加调试器');
+  await run("execute({method:'click',params:{tabId:7,ref:'r1-1'}})"); // 写入：按需附加
   assert.equal(calls.find((c) => c[0] === 'attach')[2], '1.3');
   const status = await run("handlePopup({type:'popup_status'})");
   assert.equal(status.autoAuthorize, true);
@@ -247,7 +249,7 @@ test('页面快照上限、隐藏过滤、密码保密、重复注入保留refs�
   const displayNone = new h.Element('button', { display: 'none' });
   const extras = Array.from({ length: 160 }, () => new h.Element('button'));
   h.setNodes([input, password, hidden, hiddenButton, displayNone, ...extras]);
-  const first = h.agent.snapshot();
+  const first = await h.agent.snapshot();
   assert.equal(first.text.length, 12000);
   assert.equal(first.elements.length, 150);
   assert.equal(first.elements[0].value, '文本');
@@ -262,7 +264,7 @@ test('页面快照上限、隐藏过滤、密码保密、重复注入保留refs�
   await h.agent.focus(oldRef);
   assert.equal(h.document.activeElement, input);
   assert.equal(input.value, '文本');
-  const second = h.agent.snapshot();
+  const second = await h.agent.snapshot();
   assert.notEqual(second.elements[0].ref, oldRef);
   await assert.rejects(h.agent.prepare(oldRef), /过期/);
   await assert.rejects(h.agent.focus(second.elements[2].ref), /仅支持/);

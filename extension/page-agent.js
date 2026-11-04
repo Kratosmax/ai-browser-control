@@ -107,10 +107,31 @@
     return { focused: true };
   }
 
-  function snapshot() {
+  async function snapshot() {
     generation = Math.max(generation + 1, Date.now());
     refs = new Map();
     const elements = [];
+    const iframes = Array.from(document.querySelectorAll('iframe'));
+
+    const collectText = () => {
+      let text = (document.body?.innerText || '');
+      // 同源 iframe 文本并入；跨域受浏览器隔离拿不到，如实以 frames 计数呈现。
+      for (const frame of iframes) {
+        try {
+          const inner = frame.contentDocument?.body?.innerText || '';
+          if (inner.trim()) text += '\n[iframe]\n' + inner;
+        } catch { /* 跨域 iframe */ }
+      }
+      return text;
+    };
+
+    let text = collectText();
+    // SPA 异步渲染：首拍过短时等一次再补拍（有上限，避免拖慢正常页面）。
+    if (text.trim().length < 200) {
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      text = collectText();
+    }
+
     for (const element of document.querySelectorAll(SELECTOR)) {
       if (elements.length >= 150) break;
       if (!visible(element)) continue;
@@ -131,7 +152,9 @@
     return {
       title: document.title,
       url: location.href,
-      text: (document.body?.innerText || '').slice(0, 12000),
+      text: text.slice(0, 12000),
+      textLength: text.length,
+      frames: iframes.length,
       elements
     };
   }
