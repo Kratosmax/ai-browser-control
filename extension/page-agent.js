@@ -215,8 +215,26 @@
     return { pulsed: true };
   }
 
+  // Edge 对注入函数抛错可能返回 result:null；这里统一捕获并把真实错误带回主世界。
+  const guarded = (name, fn) => async (...a) => {
+    try {
+      return await fn(...a);
+    } catch (error) {
+      return { __zcodeError: String((error && error.message) || error) };
+    }
+  };
+
+  const agent = {
+    snapshot: guarded('snapshot', snapshot),
+    prepare: guarded('prepare', prepare),
+    focus: guarded('focus', focus),
+    focusTarget: guarded('focusTarget', focusTarget),
+    showCursor: guarded('showCursor', showCursor),
+    cursorPulse: guarded('cursorPulse', cursorPulse)
+  };
+
   Object.defineProperty(globalThis, '__zcodeTabAgent', {
-    value: Object.freeze({ snapshot, prepare, focus, focusTarget, showCursor, cursorPulse }),
+    value: Object.freeze(agent),
     configurable: false,
     writable: false
   });

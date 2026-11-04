@@ -266,13 +266,17 @@ test('页面快照上限、隐藏过滤、密码保密、重复注入保留refs�
   assert.equal(input.value, '文本');
   const second = await h.agent.snapshot();
   assert.notEqual(second.elements[0].ref, oldRef);
-  await assert.rejects(h.agent.prepare(oldRef), /过期/);
-  await assert.rejects(h.agent.focus(second.elements[2].ref), /仅支持/);
+  const expiredRef = await h.agent.prepare(oldRef);
+  assert.match(expiredRef.__zcodeError, /过期/);
+  const notInput = await h.agent.focus(second.elements[2].ref);
+  assert.match(notInput.__zcodeError, /仅支持/);
   input.readOnly = true;
-  await assert.rejects(h.agent.focus(second.elements[0].ref), /只读/);
+  const readOnly = await h.agent.focus(second.elements[0].ref);
+  assert.match(readOnly.__zcodeError, /只读/);
   input.readOnly = false;
   input.isConnected = false;
-  await assert.rejects(h.agent.prepare(second.elements[0].ref), /已移除/);
+  const removed = await h.agent.prepare(second.elements[0].ref);
+  assert.match(removed.__zcodeError, /已移除/);
 });
 
 test('页面代理返回 null 或携带 error 时，报告真实原因而非解构报错', async () => {

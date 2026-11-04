@@ -105,6 +105,9 @@ async function pageAgent(tabId, operation, ref) {
     const detail = typeof outcome.error === 'object' ? outcome.error.message : String(outcome.error);
     throw new Error(`页面代理执行失败：${detail}`);
   }
+  if (outcome.result && typeof outcome.result === 'object' && '__zcodeError' in outcome.result) {
+    throw new Error(`页面代理执行失败：${outcome.result.__zcodeError}`);
+  }
   if (outcome.result === undefined || outcome.result === null) {
     throw new Error('页面代理未返回结果：目标可能已不可见或被遮挡，请重新 snapshot');
   }
