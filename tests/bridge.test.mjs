@@ -145,12 +145,16 @@ test('扩展待机时 /rpc 等待唤醒（不立即拒绝），超时给出可�
 
 test('桥接验证标签页 ID、ref、协议和参数白名单', () => {
   for (const [method, params] of [
-    ['snapshot', { tabId: -1 }], ['snapshot', { tabId: '42' }],
+    ['snapshot', { tabId: -1 }], ['snapshot', { tabId: '42' }], ['snapshot', { tabId: 1, load: 'forever' }],
+    ['scroll', { tabId: 1, direction: 'sideways' }], ['scroll', { tabId: 1, direction: 'bottom', ref: 'guess' }],
+    ['click', { tabId: 1, ref: 'r1-1', expectedContext: '' }],
     ['click', { tabId: 1, ref: '#guess' }], ['fill', { tabId: 1, ref: 'r1-0', text: 5 }],
     ['navigate', { tabId: 1, url: 'file:///C:/secret' }],
     ['press', { tabId: 1, key: 'F12' }], ['list_tabs', { unexpected: 1 }]
   ]) assert.throws(() => validateCommand(method, params));
   assert.deepEqual(validateCommand('click', { tabId: 42, ref: 'r1-3' }), { method: 'click', params: { tabId: 42, ref: 'r1-3' } });
+  assert.equal(validateCommand('snapshot', { tabId: 42, load: 'current' }).params.load, 'current');
+  assert.equal(validateCommand('scroll', { tabId: 42, direction: 'bottom' }).method, 'scroll');
 });
 
 test('MCP stdio 握手、工具目录和错误响应', async () => {
@@ -173,27 +177,35 @@ test('MCP stdio 握手、工具目录和错误响应', async () => {
   const replies = output.trim().split('\n').map(x => JSON.parse(x));
   assert.equal(replies.length, 4);
   assert.equal(replies.find(x => x.id === 1).result.serverInfo.name, 'ai-browser-17653');
+  assert.equal(replies.find(x => x.id === 1).result.serverInfo.version, JSON.parse(await fs.readFile(path.join(root, '.zcode-plugin', 'plugin.json'), 'utf8')).version);
   const tools = replies.find(x => x.id === 2).result.tools;
-  assert.equal(tools.length, 9);
-  assert.equal(new Set(tools.map(x => x.name)).size, 9);
+  assert.equal(tools.length, 10);
+  assert.equal(new Set(tools.map(x => x.name)).size, 10);
+  assert.equal(tools.find(x => x.name === 'browser_snapshot').inputSchema.properties.load.default, 'auto');
+  assert(tools.find(x => x.name === 'browser_scroll'));
   assert.equal(replies.find(x => x.id === 3).result.isError, true);
   assert.equal(replies.find(x => x.id === 4).error.code, -32601);
 });
 
-test('插件清单、市场、图标指向同一版本及实际资源', async () => {
+test('插件清单、可选市场、图标指向同一版本及实际资源', async () => {
   const manifest = JSON.parse(await fs.readFile(path.join(root, '.zcode-plugin', 'plugin.json'), 'utf8'));
-  const catalog = JSON.parse(await fs.readFile(path.join(root, '..', 'marketplace.json'), 'utf8'));
   assert.equal(manifest.name, 'ai-browser-control');
-  const listing = catalog.plugins.find(x => x.name === manifest.name);
-  assert.equal(listing.version, manifest.version);
-  assert.equal(catalog.name, 'dev-ai-browser-local');
-  assert.equal(path.resolve(root, '..', listing.source), root);
+  // 独立 GitHub 仓库不含父目录市场；本机附带市场时仍验证其一致性。
+  let catalog;
+  try { catalog = JSON.parse(await fs.readFile(path.join(root, '..', 'marketplace.json'), 'utf8')); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (catalog) {
+    const listing = catalog.plugins.find(x => x.name === manifest.name);
+    assert.equal(listing.version, manifest.version);
+    assert.equal(catalog.name, 'dev-ai-browser-local');
+    assert.equal(path.resolve(root, '..', listing.source), root);
+  }
   const mcp = JSON.parse(await fs.readFile(path.join(root, manifest.mcpServers), 'utf8'));
   assert.ok(mcp.mcpServers['ai-browser'].args[0].includes('${CLAUDE_PLUGIN_ROOT}'));
   await fs.access(mcp.mcpServers['ai-browser'].command);
   const extension = JSON.parse(await fs.readFile(path.join(root, 'extension', 'manifest.json'), 'utf8'));
   assert.equal(extension.name, 'AI Browser Control');
-  assert.equal(extension.version, '0.8.1');
+  assert.equal(extension.version, manifest.version);
   for (const file of Object.values(extension.icons)) await fs.access(path.join(root, 'extension', file));
   await fs.access(path.join(root, manifest.skills, 'ai-browser-control', 'SKILL.md'));
 });

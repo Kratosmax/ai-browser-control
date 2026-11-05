@@ -10,20 +10,20 @@ const root = path.resolve(__dirname, '..');
 const source = (name) => fs.readFileSync(path.join(root, name), 'utf8');
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
-function backgroundHarness() {
+function backgroundHarness(stored = { cdpEnabled: true, screenshotCdpEnabled: true }) {
   const calls = [];
   const listeners = {};
   const timers = new Map();
   const event = (name) => ({ addListener: (fn) => { listeners[name] = fn; } });
   const tabs = [
-    { id: 7, title: 'Example', url: 'https://example.test/', active: true },
+    { id: 7, windowId: 1, title: 'Example', url: 'https://example.test/', active: true },
     { id: 8, url: 'chrome://settings', active: false }
   ];
   let fetchImpl = async () => { throw new Error('offline'); };
   let timerId = 0;
   const chrome = {
     storage: { local: {
-      get: async () => ({}), set: async (data) => calls.push(['store', data]), remove: async () => {}
+      get: async () => stored, set: async (data) => calls.push(['store', data]), remove: async () => {}
     } },
     runtime: {
       id: 'test', getURL: (p) => `chrome-extension://test/${p}`,
@@ -35,6 +35,7 @@ function backgroundHarness() {
     },
     tabs: {
       query: async () => tabs,
+      captureVisibleTab: async (windowId) => { calls.push(['capture', windowId]); return 'data:image/png;base64,PNG'; },
       get: async (id) => {
         const tab = tabs.find((item) => item.id === id);
         if (!tab) throw new Error('missing');
@@ -206,7 +207,7 @@ function pageHarness() {
   let hit = null;
   const document = {
     title: 'Mock page', body: { innerText: '可见文本'.repeat(5000) }, activeElement: null,
-    querySelectorAll: () => nodes,
+    querySelectorAll: selector => ['*', 'input,textarea,select,button,a,[role],[contenteditable]'].includes(selector) ? nodes : [],
     getElementById: () => null,
     elementFromPoint: () => hit
   };
@@ -227,6 +228,7 @@ function pageHarness() {
       return this.type === 'hidden' ? [] : [{ left: 10, right: 110, top: 10, bottom: 30, width: 100, height: 20 }];
     }
     matches(selector) { return selector === ':disabled' && Boolean(this.disabled); }
+    querySelectorAll() { return []; }
     contains(other) { return other === this; }
     scrollIntoView() { hit = this; }
     focus() { document.activeElement = this; }
@@ -245,7 +247,7 @@ function pageHarness() {
   return {
     document, Element, HTMLInputElement, HTMLTextAreaElement,
     setNodes: (items) => { nodes = items; }, inject,
-    get agent() { return context.__zcodeTabAgent; }
+    get agent() { return context.__aiBrowserPageAgent4; }
   };
 }
 
@@ -261,6 +263,11 @@ test('页面快照上限、隐藏过滤、密码保密、重复注入保留refs�
   const first = await h.agent.snapshot();
   assert.equal(first.text.length, 12000);
   assert.equal(first.elements.length, 150);
+  assert.equal(first.coverage.scope, 'loaded-dom');
+  assert.equal(first.coverage.dataCompleteness, 'unknown');
+  assert.equal(first.coverage.textTruncated, true);
+  assert.equal(first.coverage.elementScanLimited, true);
+  assert(first.coverage.scannedCandidates < first.coverage.candidateCount);
   assert.equal(first.elements[0].value, '文本');
   assert(!Object.hasOwn(first.elements[1], 'value'));
   assert(!JSON.stringify(first).includes('SECRET'));
@@ -322,6 +329,62 @@ test('页面代理返回 null 或携带 error 时，报告真实原因而非解�
   await assert.rejects(run("execute({method:'snapshot',params:{tabId:7}})"), /目标中心被其他元素遮挡/);
 });
 
+test('长列表不会挤掉当前弹窗按钮，保留控件仍按 DOM 顺序输出', async () => {
+  const h = pageHarness();
+  const rows = Array.from({ length: 180 }, (_, index) => {
+    const node = new h.Element('button');
+    node.innerText = `航班 ${index}`;
+    node.getClientRects = () => [{ left: 10, right: 110, top: 2000 + index * 20, bottom: 2020 + index * 20, width: 100, height: 20 }];
+    return node;
+  });
+  const close = new h.Element('button'); close.innerText = '我知道了';
+  h.setNodes([...rows, close]);
+  const snap = await h.agent.snapshot();
+  assert.equal(snap.elements.length, 150);
+  assert.equal(snap.elements.at(-1).name, '我知道了');
+  assert.equal(snap.elements[0].name, '航班 0');
+  assert.equal(snap.coverage.selectionPriority, 'viewport-first');
+  assert.equal(snap.coverage.elementScanLimited, true);
+  const point = await h.agent.prepare(snap.elements.at(-1).ref);
+  assert.equal(point.x, 60);
+});
+
+test('列表复用同一个按钮节点时，身份变化阻止点击；同名按钮要求业务上下文', async () => {
+  const h = pageHarness();
+  const first = new h.Element('button'); first.innerText = '订票';
+  const second = new h.Element('button'); second.innerText = '订票';
+  const row1 = new h.Element('article'); row1.innerText = '航班 F001 订票';
+  const row2 = new h.Element('article'); row2.innerText = '航班 F002 订票';
+  first.parentElement = row1; second.parentElement = row2;
+  h.setNodes([first, second]);
+  const snap = await h.agent.snapshot({ load: 'current' });
+  assert.equal(snap.elements[1].context, '航班 F002 订票');
+  assert.equal(snap.elements[1].requiresExpectedContext, true);
+  assert.match((await h.agent.prepare({ ref: snap.elements[1].ref, action: 'click' })).__zcodeError, /expectedContext/);
+  assert.match((await h.agent.prepare({ ref: snap.elements[1].ref, expectedContext: 'F001' })).__zcodeError, /不符/);
+  assert.equal((await h.agent.prepare({ ref: snap.elements[1].ref, expectedContext: 'F002' })).x, 60);
+  row2.innerText = '航班 F999 订票';
+  assert.match((await h.agent.prepare(snap.elements[1].ref)).__zcodeError, /身份已变化/);
+  assert.match((await h.agent.domClick(snap.elements[1].ref)).__zcodeError, /身份已变化/);
+});
+
+test('点击回执明确未验证业务结果，快照默认自动加载且可显式只回读当前DOM', async () => {
+  const { run, calls } = backgroundHarness({});
+  await tick();
+  await run("handlePopup({type:'authorize_tab',tabId:7})");
+  await run("execute({method:'snapshot',params:{tabId:7}})");
+  assert(calls.some(c => c[0] === 'script' && c[1].args?.[0] === 'snapshot' && c[1].args[1].load === 'auto'));
+  await run("execute({method:'snapshot',params:{tabId:7,load:'current'}})");
+  assert(calls.some(c => c[0] === 'script' && c[1].args?.[0] === 'snapshot' && c[1].args[1].load === 'current'));
+  const result = await run("execute({method:'click',params:{tabId:7,ref:'r1-1',expectedContext:'F002'}})");
+  assert.equal(result.actionDispatched, true);
+  assert.equal(result.outcome, 'unverified');
+  assert.match(result.verificationRequired, /身份/);
+  assert(calls.some(c => c[0] === 'script' && c[1].args?.[0] === 'prepare' && c[1].args[1].expectedContext === 'F002'));
+  await run("execute({method:'scroll',params:{tabId:7,direction:'bottom'}})");
+  assert(calls.some(c => c[0] === 'script' && c[1].args?.[0] === 'scroll'));
+});
+
 test('光标消失延时：0-60 秒校验、持久化并可随命令下发', async () => {
   const { calls, run } = backgroundHarness();
   await tick();
@@ -334,20 +397,145 @@ test('光标消失延时：0-60 秒校验、持久化并可随命令下发', asy
   assert.equal(status.cursorHideSec, 10);
 });
 
-test('CDP 开关：关闭后写入拒绝、读取照常，重新开启恢复', async () => {
+test('输入 CDP 与截图 CDP 独立，截图可单独关闭并回退当前页接口', async () => {
   const { calls, run } = backgroundHarness();
   await tick();
   await run("handlePopup({type:'set_auto_authorize',enabled:true})");
+  await run("execute({method:'click',params:{tabId:7,ref:'r1-1'}})");
+  assert(calls.some(c => c[0] === 'attach'));
+  calls.length = 0;
   await run("handlePopup({type:'set_cdp_enabled',enabled:false})");
+  assert(calls.some(c => c[0] === 'detach'));
   await run("execute({method:'snapshot',params:{tabId:7}})");          // 读取不受影响
   assert(!calls.some((c) => c[0] === 'attach'), '读取不附加调试器');
-  await assert.rejects(run("execute({method:'click',params:{tabId:7,ref:'r1-1'}})"), /CDP 写入已在扩展弹窗中关闭/);
-  await assert.rejects(run("execute({method:'screenshot',params:{tabId:7}})"), /CDP 写入已在扩展弹窗中关闭/);
+  assert.equal((await run("execute({method:'click',params:{tabId:7,ref:'r1-1'}})")).mode, 'dom');
+  await run("execute({method:'fill',params:{tabId:7,ref:'r1-1',text:'abc'}})");
+  await run("execute({method:'press',params:{tabId:7,key:'Enter'}})");
+  assert(calls.some(c => c[0] === 'script' && c[1].args?.[0] === 'domFill'));
+  assert(calls.some(c => c[0] === 'script' && c[1].args?.[0] === 'domPress'));
+  assert(!calls.some(c => c[0] === 'cdp' || c[0] === 'attach'), 'DOM 模式不调用 CDP');
+  assert.equal((await run("execute({method:'screenshot',params:{tabId:7}})")).data, 'PNG');
+  assert(calls.some(c => c[0] === 'cdp' && c[1] === 'Page.captureScreenshot'));
+  assert.equal((await run("handlePopup({type:'popup_status'})")).cdpEnabled, false);
+  await run("handlePopup({type:'set_screenshot_cdp_enabled',enabled:false})");
+  calls.length = 0;
+  assert.equal((await run("execute({method:'screenshot',params:{tabId:7}})")).data, 'PNG');
+  assert(!calls.some(c => c[0] === 'cdp' || c[0] === 'attach'));
+  await run("chrome.tabs.query=async()=>[{id:9}]");
+  await assert.rejects(run("execute({method:'screenshot',params:{tabId:7}})"), /当前选中/);
+  assert.equal(calls.filter(c => c[0] === 'capture').length, 1, '后台目标拒绝时不截其他页面');
   await run("handlePopup({type:'set_cdp_enabled',enabled:true})");
   await run("execute({method:'click',params:{tabId:7,ref:'r1-1'}})");
   assert(calls.some((c) => c[0] === 'attach'), '重新开启后写入恢复');
   const st = await run("handlePopup({type:'popup_status'})");
   assert.equal(st.cdpEnabled, true);
+});
+
+test('默认 DOM 输入、允许独立截图；截图只调用捕获命令并解除临时附加', async () => {
+  const { calls, run } = backgroundHarness({});
+  await tick();
+  const state = await run("handlePopup({type:'popup_status'})");
+  assert.equal(state.cdpEnabled, false);
+  assert.equal(state.screenshotCdpEnabled, true);
+  await run("handlePopup({type:'authorize_tab',tabId:7})");
+  const click = await run("execute({method:'click',params:{tabId:7,ref:'r1-1'}})");
+  assert.equal(click.mode, 'dom');
+  assert(!calls.some(c => c[0] === 'attach'));
+  calls.length = 0;
+  await run("execute({method:'screenshot',params:{tabId:7}})");
+  assert.deepEqual(calls.filter(c => c[0] === 'cdp').map(c => c[1]), ['Page.captureScreenshot']);
+  assert.equal(calls.filter(c => c[0] === 'attach').length, 1);
+  assert.equal(calls.filter(c => c[0] === 'detach').length, 1);
+  assert.equal(run('attached.size'), 0);
+  await run("execute({method:'snapshot',params:{tabId:7}})");
+  const tab = (await run("execute({method:'list_tabs'})"))[0];
+  assert.equal(tab.inputMode, 'dom');
+  assert.equal(tab.screenshotMode, 'cdp');
+  calls.length = 0;
+  await run("chrome.debugger.sendCommand=async()=>{throw new Error('capture failed')}");
+  await assert.rejects(run("execute({method:'screenshot',params:{tabId:7}})"), /capture failed/);
+  assert.equal(run('attached.size'), 0, '截图失败也必须解除临时附加');
+  assert.equal(calls.filter(c => c[0] === 'detach').length, 1);
+  const persisted = backgroundHarness({ cdpEnabled: true, screenshotCdpEnabled: false });
+  await tick();
+  const saved = await persisted.run("handlePopup({type:'popup_status'})");
+  assert.equal(saved.cdpEnabled, true);
+  assert.equal(saved.screenshotCdpEnabled, false);
+});
+
+test('轨迹时间与光标时间独立，默认5秒、最多60秒并可持久化', async () => {
+  const { calls, run } = backgroundHarness();
+  await tick();
+  assert.equal((await run("handlePopup({type:'popup_status'})")).cursorTrailSec, 5);
+  for (const seconds of [-1, 61, 1.5, '5']) {
+    await assert.rejects(run(`handlePopup({type:'set_cursor_trail',seconds:${JSON.stringify(seconds)}})`), /0-60/);
+  }
+  await run("handlePopup({type:'set_cursor_trail',seconds:60})");
+  assert(calls.some(c => c[0] === 'store' && c[1].cursorTrailSec === 60));
+  const state = await run("handlePopup({type:'popup_status'})");
+  assert.equal(state.cursorTrailSec, 60);
+  assert.equal(state.cursorHideSec, 10);
+  await run("handlePopup({type:'authorize_tab',tabId:7})");
+  await run("execute({method:'click',params:{tabId:7,ref:'r1-1'}})");
+  assert(calls.some(c => c[0] === 'script' && c[1].args?.[0] === 'showCursor' && c[1].args[1].trailMs === 60000));
+  const persisted = backgroundHarness({ cursorTrailSec: 0 });
+  await tick();
+  assert.equal((await persisted.run("handlePopup({type:'popup_status'})")).cursorTrailSec, 0);
+});
+
+test('释放授权在自动模式下生效，手动重新授权后恢复', async () => {
+  const { run } = backgroundHarness();
+  await tick();
+  await run("handlePopup({type:'set_auto_authorize',enabled:true})");
+  assert.equal((await run("execute({method:'list_tabs'})"))[0].authorized, true);
+  await run("execute({method:'release',params:{tabId:7}})");
+  assert.equal((await run("execute({method:'list_tabs'})"))[0].authorized, false);
+  await assert.rejects(run("execute({method:'snapshot',params:{tabId:7}})"), /已释放/);
+  await run("handlePopup({type:'authorize_tab',tabId:7})");
+  await run("execute({method:'snapshot',params:{tabId:7}})");
+});
+
+test('断开选择持久化，后台重启不自动配对', async () => {
+  const { run, calls, fetch } = backgroundHarness({ disconnected: true });
+  let requests = 0;
+  fetch(async () => { requests++; throw new Error('offline'); });
+  await tick();
+  assert.equal(requests, 0);
+  const state = await run("handlePopup({type:'popup_status'})");
+  assert.equal(state.connected, false);
+  assert.equal(state.connecting, false);
+  await run("handlePopup({type:'disconnect'})");
+  assert(calls.some(c => c[0] === 'store' && c[1].disconnected === true));
+});
+
+test('截图期间切页会丢弃图片，不返回其他标签页内容', async () => {
+  const { run } = backgroundHarness();
+  await tick();
+  await run("handlePopup({type:'set_auto_authorize',enabled:true})");
+  await run("handlePopup({type:'set_cdp_enabled',enabled:false})");
+  await run("handlePopup({type:'set_screenshot_cdp_enabled',enabled:false})");
+  await run("let queries=0;chrome.tabs.query=async()=>[{id:++queries===1?7:9}]");
+  await assert.rejects(run("execute({method:'screenshot',params:{tabId:7}})"), /已丢弃截图/);
+});
+
+test('用户取消调试后，自动授权也不偷偷重新附加', async () => {
+  const { run, listeners, calls } = backgroundHarness();
+  await tick();
+  await run("handlePopup({type:'set_auto_authorize',enabled:true})");
+  await run("execute({method:'click',params:{tabId:7,ref:'r1-1'}})");
+  listeners.detach({ tabId: 7 });
+  calls.length = 0;
+  await assert.rejects(run("execute({method:'click',params:{tabId:7,ref:'r1-1'}})"), /已释放/);
+  assert(!calls.some(c => c[0] === 'attach'));
+});
+
+test('光标移动期间目标移位时不按旧坐标点击', async () => {
+  const { run, calls } = backgroundHarness();
+  await tick();
+  await run("handlePopup({type:'authorize_tab',tabId:7})");
+  await run("let prepares=0; pageAgent=async(id,op)=>op==='prepare'?{x:++prepares*20,y:30}:{};");
+  await assert.rejects(run("execute({method:'click',params:{tabId:7,ref:'r1-1'}})"), /位置变化/);
+  assert(!calls.some(c => c[0] === 'cdp' && c[2].type === 'mousePressed'));
 });
 
 test('桥端口可配置、失败按指数退避、成功归零', async () => {

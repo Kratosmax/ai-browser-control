@@ -1,5 +1,142 @@
 # 验证记录
 
+## 0.9.0 仓库更新与本机升级（2026-11-05）
+
+用户已授权提交、推送现有GitHub仓库并更新本机。本轮包含此前验收的交互改造、输入/截图独立开关、动态列表能力和仓库分发技能；版本由0.8.1升级为0.9.0。插件清单为服务版本源，扩展清单同步版本，本地父目录市场条目同步0.9.0。未创建标签或GitHub Release。
+
+本机Edge的解压扩展路径、Codex/ZCode的MCP入口均指向本仓库；不是另一份待覆盖的副本。更新程序保留客户端配置，仅拉取源码并重启旧版本桥。扩展运行版本须在用户重载后核对，不能用磁盘版本冒充运行版本。回归结果和推送/更新回执保存于忽略的temp/qa目录；历史未提交状态只描述当时阶段。
+
+0.9.0打包前重跑：Node37/37、browser-ui.py、browser-extension.py、browser-loading.py及技能格式校验均通过。另修复旧ZCode兼容注册只复制SKILL.md而遗漏references的安装缺口；安装/显式注册刷新回归核对参考文件与仓库字节一致。Codex旧兼容指引增加browser_scroll并指向仓库技能，默认update仍不重写客户端配置，需用户显式要求refresh-registration才重放注册。
+
+## 2026-11-05：仓库分发技能的通用动态列表流程
+
+本阶段仅修改仓库分发文档，不改用户个人技能或浏览器运行代码。`skills/ai-browser-control/SKILL.md` 增加动态列表路由，`references/dynamic-lists.md` 描述追加式懒加载、独立容器、虚拟列表、加载更多、分页、无限流、范围/结束证据、跨批去重及按业务身份验证操作。AGENT-INTEGRATION.md 和 README 引用同一份流程。
+
+技能结构校验 `python -X utf8 <skill-creator>/scripts/quick_validate.py skills/ai-browser-control` 通过，frontmatter无BOM，引用路径与插件清单skills入口检查通过，预览包包含新增参考文件，`git diff --check` 通过。按实际能力审查：auto有预算且恢复原位；observed没有ref也不跨调用累计；分页需要逐页确认；相似按钮的expectedContext是包含检查，不能代替唯一身份判断。
+
+场景核对覆盖：商品列表分批追加、固定行数的虚拟表格、订单多页汇总、多个独立滚动区域、无限评论/日志、上下文混入相邻记录、位置排序变化及点击失败。此为规则/能力一致性检查，未另称这些站点都已现场验证；既有真实Edge夹具与携程证据见下文。纯文档修改没有重复运行浏览器测试。
+
+回滚包 `temp/qa/before-general-list-skill.zip`。本轮尚未提交、推送或发布；用户取得该版本后由插件清单skills目录加载上述规范，不能把本地文件修改说成远端用户已经收到。
+
+## 2026-11-05：纠正懒加载遗漏和错误目标验收
+
+### 重开 Codex 后现场复核
+
+新版10个工具及连接恢复，实际携程 tabId=1891451801（后台），DOM输入+独立CDP截图。通过唯一“我知道了”关闭欢迎提示后，快照确认弹窗移除、携程重新查询。未点击任何航班或下单产品。
+
+现场发现上下文提取仍会跨入整个列表，把多班航班号包含进单个按钮的 context。这会削弱 expectedContext 的错配保护，因此不能沿用之前的“保护已完整验收”结论。已限制上下文不跨入含其他独立按钮的非语义容器，并增加普通div卡片回归：各按钮只包含本卡片航班，相邻航班号不匹配。页面代理更新为4，以便仅重载扩展就能在既有页面注入，MCP工具参数未变。
+
+首次回读未取得列表结束证据，没有将当时7个订票按钮的末项认定为最后一班。回滚包 `temp/qa/before-live-context.zip`。
+
+用户仅重载扩展后，代理4现场确认各订票按钮context只含本卡片航班。默认探测使13个订票ref增加至98个；两次从头到尾遍历，末端页面高度均11685，末项均南航CZ3999→CZ8964，后面直接接站点页脚，未见继续/分页按钮。这是当前查询页面末端证据，不是后端全部库存证明；正文与累计观察仍有截断标记，dataCompleteness保持unknown。
+
+现场错配测试：第一班ref传入AQ1723，被expectedContext拒绝；随后回读没有航班展开。按正确身份完成ZH9675展开→AQ1723展开→CZ3999/CZ8964展开→返回第一班，逐次快照核对同一航班号与收起状态、正文产品区；末项及返回第一班另有截图。
+
+末项首次远距离定位返回“目标不在可操作的视口内”，未派发点击，回读确认仍为订票。用正式scroll向上定位到末项后，重新快照取得ref，再次点击成功。该错误已识别，没有按clicked计数误报。远距离prepare首次未进入视口的具体原因尚未查实，不宣称已修复。
+
+证据：`temp/qa/ctrip-live-v4.json`、`ctrip-live-v4-last.png`、`ctrip-live-v4-return.png`。原先错误流程的撤回记录继续保留，本轮现场结果不覆盖它。37项Node、真实Edge UI、懒加载/虚拟列表回归及MV3→桥→MCP集成均通过。
+
+**撤回上轮携程流程“全部完成”的结论。** 当时只确认了已加载末项的展开；没有证明其为用户要求的最后一班。返回成功或多出“收起”按钮也不能证明目标身份正确。原始 `temp/qa/ctrip-replay.json` 与截图保留；复核结论另存 `temp/qa/ctrip-replay-review.json`，不得再据原回执认定任务通过。
+
+本轮行为变化：
+
+- 快照默认有界滚动探测懒加载，累计观察后恢复原滚动位置；最大约8秒/40轮。返回停止原因、截断标志和底部文本，始终保留 `complete=false`，没有把底部暂时稳定当作全量证明。操作后用 `load=current` 回读，另有 `browser_scroll` 支持继续探测。
+- ref 绑定按钮及周边卡片身份；滚动、动画后再检查，节点复用成另一业务对象时拒绝点击。同名按钮需 `expectedContext`，例如完整航班号，错配直接拒绝。
+- 点击回执明确 `outcome=unverified`；必须回读同一业务身份的展开/跳转结果，不能只数“收起”。接入规范、项目技能和工具描述同步此验收要求。
+
+验证：Node 37/37 通过；真实 Edge UI、MV3→桥→MCP 集成通过。新增 `tests/browser-loading.py` 在真实 Edge 验证650毫秒延迟分批加载6→12→18、固定5个节点的30项虚拟列表、独立滚动容器、弹窗阻塞、无限列表预算停止，以及复用节点/定位滚动期间身份变化的点击拦截。集成测试从 MCP 默认快照开始，在后台加载18项、滚动末尾、拒绝错配航班，再点击 F018 并回读该航班展开，选中标签不变。
+
+重跑：沿用下文三个命令，另执行 `python -X utf8 tests/browser-loading.py`。证据 `temp/qa/lazy-identity-node-tests.txt`、`browser-loading-results.json`、`browser-extension-results.json`、`lazy-last-verified.png`。本阶段回滚包 `temp/qa/before-lazy-identity.zip`，哈希见同名JSON。
+
+边界：滚动稳定、正文长度不变或 DOM 就绪不能证明任意站点业务全量；分页按钮不会自动点击，多个滚动区域不会自动遍历全部。超过预算或观察截断必须继续核对或报告未完成。新增版本尚未在用户日常携程页验收；需重载扩展及重连MCP刷新新增的工具/参数，不能用本地夹具通过替代该验收。
+
+## 2026-11-04：交互改造本地预览
+
+基线为 `eb2c5ce384c4d9f5329d7c3770f44e7fa4a04385`，正式清单仍为 0.8.1；本轮未提交、未推送、未发布。需求来源见 REQUIREMENTS.md，第三方接入见 AGENT-INTEGRATION.md。
+
+### 已完成
+
+| 验证 | 真实结果与证据 |
+| --- | --- |
+| Node 协议、安装兼容和扩展回归 | 35/35 通过，`temp/qa/viewport-priority-node-result.json`；此前 34 项完整输出保留于 `temp/qa/node-tests.txt` |
+| 真实 Edge UI | Edge 156.0.4314.58，独立 headless 配置，ISOLATED 脚本 + closed Shadow DOM；`temp/qa/browser-ui-results.json` |
+| 强制居中的反例 | 旧版两个同列目标均定位到 (235,375)，页面 scrollY 从 600 变为 730；新版分别为 (235,275)/(235,505)，scrollY 保持 600。该行为能解释这一类“光标不移动”，不代表所有旧版瞬移都已定位 |
+| 动画中间帧 | 真实 Edge 帧采样包含多个不同中间坐标，最终抵达目标；浏览器实际录屏生成 `temp/qa/cursor-motion.gif` |
+| 光标停留和性能分支 | 真实计时检查 8.95 秒仍可见、10.35 秒已隐藏；0 秒配置生效；静止不继续请求动画帧；减少动态效果偏好生效 |
+| 弹窗 | 连接/断开、授权/释放、CDP 开关、空值校验、错误恢复、长标题、系统页禁用、深色与 200% DPI；截图见 `temp/qa/popup-*.png` |
+| 真实扩展全链路 | 独立 Edge MV3 → 临时桥 → MCP stdio；真实 CDP 填表、点击与截图，关闭后 DOM 填表/点击，实际页面计数与文本回读符合预期；`temp/qa/browser-extension-results.json` |
+| 后台操作 | 目标标签未选中时操作完成，不切换选中页；本轮约 0.07 秒（一次 snapshot + DOM 点击，环境相关，不是性能承诺） |
+| CDP 与释放 | 关闭后解除已有调试器；DOM 模式不重新附加；自动授权下释放有效；用户取消调试后不偷偷重新附加 |
+| 隐私与状态 | 截图期间切页会丢弃图片；断开状态跨后台重启保留；默认更新不重写 agent 配置，不依赖旧注册回执 |
+
+旧“隔离世界 + 封闭 Shadow DOM + fixed 定位造成 Edge 渲染限制”的归因未证实。参考扩展也使用这些机制，本轮相同机制下可以采到实际中间帧，因此不沿用旧归因。
+
+### 日常 Edge 追加验收（2026-11-04）
+
+本轮携程重放额外暴露：150 个控件上限会挤掉 DOM 靠后、但屏幕内可见的“我知道了”弹窗按钮。已改为视口内控件优先入选、最终仍按 DOM 顺序输出。Node 回归和真实 Edge 的“180 个离屏按钮 + 屏内弹窗”均验证可定位并关闭弹窗；证据 `temp/qa/viewport-modal.png` 与 `browser-ui-results.json`。使用新页面代理标识，重载扩展后即可在既有页面注入修复，无需刷新业务页面。用户实际重载时也刷新了携程，弹窗已消失，因此该真实弹窗关闭尚未复测；新快照已确认返回 viewport-first。
+
+刷新后重新完成：深圳航空 ZH9675 展开 → 九元航空 AQ1723 展开 → 当前已加载列表末项国航 CA1392 中转组合展开 → 返回第一班并重新展开。逐次快照确认，最终三个“收起”，截图确认第一班在视口内。列表在滚动后曾继续加载和重排，更新 ref 后再次展开末项；这里的“末项”只指当时已加载 DOM，不宣称已取齐所有航班。证据 `temp/qa/ctrip-replay.json`、`ctrip-replay-final.png`。
+
+用户重新加载扩展后，经当前正式 ai-browser MCP 在 `http://127.0.0.1:17654/` 验收，CDP 由用户在弹窗中关闭：
+
+- 页面为 hidden 时，DOM 填写 `background-ok`、点击“记录一次”，回读计数 1、记录文本一致。
+- 第一次截图时目标已不再选中，工具明确拒绝后台截图；重新查询标签列表证实目标 active=false，没有为截图切页。
+- 用户将 Edge 与聊天并排、保持测试页选中后，快照确认 visibility=visible；DOM 填写 `visible-dom-ok` 并点击，回读计数 2、记录文本一致。
+- 用户先点击扩展图标授予真实 activeTab 临时权限后，**无 CDP 当前页截图成功**，无需测试夹具的额外站点权限。
+- 证据：`temp/qa/live-edge-acceptance.json`、`temp/qa/live-edge-dom.png`。日常浏览器动画中间帧本次没有录制，最终流畅度由用户直观确认。
+
+### 明确的验收缺口
+
+- 自动化测试使用独立 Edge 配置；用户已在日常 Edge 重载并完成上述功能验收，并在携程演示后明确确认“效果很好”。新增的独立轨迹设置需再次重载后验收。
+- 正式清单仅新增 activeTab 临时权限，HTTP(S) 站点权限不扩大。自动化正向截图夹具使用额外 all_urls 权限；日常 Edge 的真实 activeTab 授权截图已独立通过，两者证据分开保留。
+- headless Edge 对未选中标签仍可能返回 visibilityState=visible；真实集成按 tab.active=false 避免等待光标动画，可见性隐藏分支另有明确标为模拟的测试。没有声称验证了所有后台节流策略。
+- 日常 Edge 的新版携程截图验收见后文：已取得真实后台截图。首轮较晚回查的一次选中变化原因未查实，不能被随后复测通过所抹去。账户及业务画面仅在忽略的本地证据目录保存，不进入源码或预览包。
+- 本轮没有在用户 ZCode 新会话中重新接入，也没有执行线上 git 更新、创建标签或发布 Release；配置契约和本地更新逻辑已验证。
+
+### 重跑
+
+```powershell
+node --test tests/bridge.test.mjs tests/install.test.mjs extension/tests/mock.test.cjs extension/tests/expired-result.test.cjs
+python -X utf8 tests/browser-ui.py
+python -X utf8 tests/browser-extension.py
+```
+
+Python 验收复用本机已有 Playwright、Pillow 与 Edge，不安装工具副本。UI 对照要求保留基线 Git 历史。所有测试页与测试桥使用临时配置；不控制用户已有页面。
+
+### 独立轨迹与截图/读取边界补充（2026-11-04）
+
+- 新增“更多设置 → 轨迹残留时间”，默认 5 秒、0–60 秒，与光标隐藏时间分开保存。真实 Edge 中验证：光标立即隐藏后轨迹仍存在，4.5 秒仍保留、5.3 秒已回收；0 秒关闭轨迹。
+- 每次移动仅维护一条 SVG 路径，最多 64 段，超出时清理最旧路径；结束后由浏览器动画和单次定时器淡出回收，不为残留持续运行 rAF。
+- 新增 `coverage` 元信息，明确只读取已加载 DOM，标记正文截断及元素扫描上限，dataCompleteness=unknown。本轮没有实现通用自动滚动、分页、虚拟列表累计收集器。
+- 补充真实 Edge CDP 后台截图：目标 tab.active=false，另一标签保持选中；在后台更新目标页背景色后，Page.captureScreenshot 返回的 PNG 像素匹配新颜色 (17,34,51)，截图前后选中标签 ID 不变。证据：`temp/qa/browser-extension-results.json`、`temp/qa/cdp-background-screenshot.png`。
+- 已核对本机参考扩展 1.26.1021.11019 的截图代码：存在 Page.captureScreenshot 和内部 CDP 录屏取帧路径。此结论限定到该安装版本；公开文档中的“完整 CDP 访问”是开发调试权限，不能据用户未启用该权限推断内部完全不使用 CDP。
+- 资料核对记录：`temp/qa/screenshot-research.json`。Chrome 官方 captureVisibleTab 说明其参数为窗口，限制为当前活动标签；本项目关闭 CDP 时按此能力工作，不为截图偷偷切换标签。
+- 当时仅有本地夹具测试；后续用户实际携程截图验收见下文，仍不能据当次成功宣称长期不会检测或拦截。
+
+来源：[Chrome tabs API](https://developer.chrome.com/docs/extensions/reference/api/tabs#method-captureVisibleTab)、[OpenAI Browser 开发者模式说明](https://learn.chatgpt.com/docs/browser#developer-mode)。
+
+### 输入与截图开关拆分（2026-11-04，替代此前总开关）
+
+- 用户明确选择：输入默认 DOM，允许截图独立使用 CDP，界面明确标注。新安装默认输入 CDP=false、截图 CDP=true；已显式保存的输入值保留，截图选项可单独关闭并持久化。
+- 输入关闭不会禁止已独立允许的截图；截图路径只调用 Page.captureScreenshot，完成后解除仅为该次截图新建的调试附加。已有输入用途的调试附加不由截图擅自解除。
+- 新增测试验证默认模式、两个开关相互独立、截图只调用捕获命令、临时附加的 attach/detach 成对发生、截图失败或成功均进入 finally 清理。
+- 真实 Edge 集成已验证默认 DOM 模式下独立 CDP 截后台页，当前选中标签不变，截图后附加集合为空。弹窗两个开关的状态、交互、长文本、深色和高 DPI 已通过 Playwright 验收。
+- 仅关闭独立截图选项时才使用 captureVisibleTab；两项均关闭才是本插件不调用 CDP 的模式。插件用途限制不等于浏览器 chrome.debugger 权限降级。
+- 正式工具 browser_list_tabs 返回 inputMode 与 screenshotMode，可用于核对实际运行模式。拆分前回滚点：`temp/qa/before-screenshot-split.zip`。
+- 用户已重载拆分后的版本。实际 browser_list_tabs 返回 inputMode=dom、screenshotMode=cdp；真实携程验收如下。
+
+### 用户实际携程后台截图（2026-11-04）
+
+- 用户授权直接验证已打开的携程页面；没有开启 CDP 真实输入，没有点击预订或进入下单。
+- 正式 MCP 核对模式为 DOM 输入、独立 CDP 截图。目标初始 active=false，截图返回真实机票列表 PNG，截图后仍可读到 7 个订票按钮，未见验证码、访问受限等可见提示。
+- 首轮在较晚回查时发现选中标签从其他页变成携程；用户明确表示没有手动切回。原因尚未查实，保存 `temp/qa/ctrip-cdp-first.json` 与截图，未将其归因于用户、截图或其他扩展。
+- 紧邻复测把“读标签 → 截图 → 再读标签”放在同一次执行中，约 221ms。前后目标均 active=false，选中 ID 列表一致；随后再回读仍未选中，航班数据可读。
+- 证据：`temp/qa/ctrip-cdp-background.json`、`temp/qa/ctrip-cdp-background.png`。当次独立 CDP 后台截图可用；首轮异常及长期风控兼容性均不因此视为已解决。
+
+下列内容为历史记录，仅描述当时版本。旧“动画放弃”的结论不作为本轮交付状态。
+
+---
+
 版本：ai-browser-control 0.5.4（0.3 重命名+一键配对；0.4 多桥端口+退避；0.5 跨机器 token；0.5.4 待机感知）。
 
 ## 0.5.4 新增验证

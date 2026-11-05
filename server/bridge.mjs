@@ -8,7 +8,8 @@ import { fileURLToPath } from 'node:url';
 
 export const DEFAULT_PORT = 17653;
 export const SERVICE_NAME = 'ai-browser-control';
-// 本地配置目录：扩展白名单和日志放这里，不再使用任何秘密 token。
+export const VERSION = JSON.parse(fs.readFileSync(new URL('../.zcode-plugin/plugin.json', import.meta.url), 'utf8')).version;
+// 本地配置目录：扩展白名单、实例日志与远程访问 token。
 export function defaultConfigDir() {
   return path.join(os.homedir(), '.zcode', SERVICE_NAME);
 }
@@ -80,13 +81,17 @@ async function readJson(req) {
 }
 
 export function validateCommand(method, params = {}) {
-  const supported = ['list_tabs', 'snapshot', 'click', 'fill', 'press', 'navigate', 'screenshot', 'release'];
+  const supported = ['list_tabs', 'snapshot', 'scroll', 'click', 'fill', 'press', 'navigate', 'screenshot', 'release'];
   if (!supported.includes(method)) throw new Error('不支持的浏览器命令');
   if (!params || typeof params !== 'object' || Array.isArray(params)) throw new Error('params 必须为对象');
-  const allowed = { list_tabs: [], snapshot: ['tabId'], click: ['tabId', 'ref'], fill: ['tabId', 'ref', 'text'], press: ['tabId', 'key'], navigate: ['tabId', 'url'], screenshot: ['tabId'], release: ['tabId'] }[method];
+  const allowed = { list_tabs: [], snapshot: ['tabId', 'load'], scroll: ['tabId', 'direction', 'ref'], click: ['tabId', 'ref', 'expectedContext'], fill: ['tabId', 'ref', 'text'], press: ['tabId', 'key'], navigate: ['tabId', 'url'], screenshot: ['tabId'], release: ['tabId'] }[method];
   if (Object.keys(params).some(key => !allowed.includes(key))) throw new Error('存在不支持的参数');
   if (method !== 'list_tabs' && (!Number.isInteger(params.tabId) || params.tabId < 0)) throw new Error('tabId 必须是有效整数');
   if (['click', 'fill'].includes(method) && (typeof params.ref !== 'string' || !/^r\d+-\d+$/.test(params.ref))) throw new Error('ref 必须来自最近的页面快照');
+  if (method === 'snapshot' && params.load !== undefined && !['auto', 'current'].includes(params.load)) throw new Error('load 必须为 auto 或 current');
+  if (method === 'scroll' && !['up', 'down', 'top', 'bottom'].includes(params.direction)) throw new Error('不支持的滚动方向');
+  if (method === 'scroll' && params.ref !== undefined && (typeof params.ref !== 'string' || !/^r\d+-\d+$/.test(params.ref))) throw new Error('ref 必须来自最近的页面快照');
+  if (method === 'click' && params.expectedContext !== undefined && (typeof params.expectedContext !== 'string' || !params.expectedContext.trim() || params.expectedContext.length > 1600)) throw new Error('expectedContext 必须为非空且最多1600字符的业务身份文本');
   if (method === 'fill' && (typeof params.text !== 'string' || params.text.length > 100000)) throw new Error('text 必须是最多 100000 字符的字符串');
   if (method === 'press' && !['Enter', 'Tab', 'Escape', 'Backspace', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', 'Home', 'End', 'Delete', 'Control+A'].includes(params.key)) throw new Error('不支持的按键');
   if (method === 'navigate') {
@@ -138,7 +143,7 @@ export function createBridge({ port = DEFAULT_PORT, host = '127.0.0.1', configDi
       const identityMatches = typeof clientId === 'string' &&
         (!origin || clientId === origin.slice('chrome-extension://'.length));
       const clientMatches = identityMatches && allowedOrigins.includes(`chrome-extension://${clientId}`);
-      if (req.url === '/health' && req.method === 'GET') return json(res, 200, { service: SERVICE_NAME, version: '0.8.1' });
+      if (req.url === '/health' && req.method === 'GET') return json(res, 200, { service: SERVICE_NAME, version: VERSION });
       // 跨机器访问防护：非回环来源必须持有效 token；configured allowedIps 时再限来源 IP。
       // 本机回环豁免（扩展与本地 agent 不受影响）。
       const sourceIp = String(req.socket.remoteAddress ?? '').replace(/^::ffff:/, '');
@@ -303,7 +308,7 @@ if (isMain) {
       await bridge.start();
       const exposed = host === '127.0.0.1' ? '仅本机' : `已对 ${host} 开放（远程访问必须携带 token）`;
       console.log(`AI Browser Control 本机桥监听 ${host}:${port}，PID ${process.pid}（${exposed}）`);
-      if (host !== '127.0.0.1') console.log(`远程 agent 凭据 token：${token}`);
+      if (host !== '127.0.0.1') console.log(`远程凭据已保存到实例目录；运行 node install.mjs bridge token ${port} 查看。`);
       if (allowedIps.length) console.log(`远程来源白名单：${allowedIps.join(', ')}`);
       console.log('保持此窗口开启；关闭窗口即停止服务。');
       for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, async () => { await bridge.close(); process.exit(0); });

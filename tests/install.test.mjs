@@ -61,7 +61,7 @@ test('check 只读预检：输出指引与桥清单，不创建任何配置', (t
   const result = run(['check'], home, appData);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /预检/);
-  assert.match(result.stdout, /register codex/);
+  assert.match(result.stdout, /AGENT-INTEGRATION\.md/);
   assert.match(result.stdout, /ai-browser-/);
   assert.equal(fs.readdirSync(home).length, 0);
   assert.equal(fs.readdirSync(appData).length, 0);
@@ -78,6 +78,22 @@ test('裸运行和未知目标被拒绝，不做任何写入', (t) => {
   assert.notEqual(unknown.status, 0);
   assert.match(unknown.stderr, /未知 agent/);
   assert.equal(fs.readdirSync(home).length, 0);
+});
+
+test('update 默认不要求旧注册回执，也不重写 agent 配置', t => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-browser-norm-home-'));
+  const appData = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-browser-norm-app-'));
+  t.after(() => { fs.rmSync(home, { recursive: true, force: true }); fs.rmSync(appData, { recursive: true, force: true }); });
+  const config = path.join(home, '.codex', 'config.toml');
+  fs.mkdirSync(path.dirname(config), { recursive: true });
+  const original = '# 用户按接入规范自行配置\nmodel = "user-choice"\n';
+  fs.writeFileSync(config, original);
+  const result = run(['update', '--skip-pull'], home, appData);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(fs.readFileSync(config, 'utf8'), original);
+  assert.match(result.stdout, /保留现有 agent 配置/);
+  assert.match(result.stdout, /重新加载/);
+  assert.equal(fs.existsSync(path.join(home, '.zcode', 'ai-browser-control', 'installed.json')), false);
 });
 
 test('bridge add --no-start：自动挑空闲端口并持久化，两次端口不同', (t) => {
@@ -99,7 +115,7 @@ test('bridge add --no-start：自动挑空闲端口并持久化，两次端口�
   }
 });
 
-test('update：按回执重放注册并刷新技能，--skip-pull 跳过 git', (t) => {
+test('update --refresh-registration：显式按旧回执刷新；--skip-pull 跳过 git', (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-update-'));
   const appData = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-update2-'));
   t.after(() => { fs.rmSync(home, { recursive: true, force: true }); fs.rmSync(appData, { recursive: true, force: true }); });
@@ -113,7 +129,7 @@ test('update：按回执重放注册并刷新技能，--skip-pull 跳过 git', (
   fs.writeFileSync(config, JSON.stringify({ theme: 'light' }));
   fs.rmSync(path.join(home, '.zcode', 'skills', 'ai-browser-control'), { recursive: true, force: true });
 
-  const update = run(['update', '--skip-pull'], home, appData);
+  const update = run(['update', '--skip-pull', '--refresh-registration'], home, appData);
   assert.equal(update.status, 0, update.stderr);
   assert.match(update.stdout, /✓ zcode：已刷新/);
   assert.match(update.stdout, /✓ codex：已刷新/);
@@ -122,6 +138,8 @@ test('update：按回执重放注册并刷新技能，--skip-pull 跳过 git', (
   const skill = path.join(home, '.zcode', 'skills', 'ai-browser-control', 'SKILL.md');
   assert.equal(fs.existsSync(skill), true);
   assert.match(fs.readFileSync(skill, 'utf8'), /直接调用/);
+  const reference = path.join(path.dirname(skill), 'references', 'dynamic-lists.md');
+  assert.equal(fs.readFileSync(reference, 'utf8'), fs.readFileSync(path.join(repo, 'skills', 'ai-browser-control', 'references', 'dynamic-lists.md'), 'utf8'));
 });
 
 test('register zcode：写入用户级 mcp.servers，保留既有设置与其他服务器，备份且幂等', (t) => {

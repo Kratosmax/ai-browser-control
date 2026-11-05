@@ -1,0 +1,25 @@
+<!doctype html><meta charset="utf-8"><style>
+body{margin:0;font:16px sans-serif}article{height:180px;box-sizing:border-box;padding:20px;border-bottom:1px solid #ddd}
+button{padding:12px}#nested{height:450px;overflow:auto}#modal{position:fixed;inset:0;background:#8888}
+</style><main></main><output></output><script>
+const mode=new URL(location.href).searchParams.get('mode');
+const main=document.querySelector('main');let count=0,pending=false;
+const row=i=>`<article><span>航班 F${String(i).padStart(3,'0')}</span> <button onclick="this.textContent='收起';this.setAttribute('aria-expanded','true');document.querySelector('output').textContent=this.previousElementSibling.textContent">订票</button></article>`;
+function append(n){for(let i=0;i<n;i++)main.insertAdjacentHTML('beforeend',row(++count));}
+if(mode==='virtual'){
+  document.body.style.height='5400px';main.style.position='absolute';
+  for(let i=1;i<=5;i++)main.insertAdjacentHTML('beforeend',row(i));
+  function render(){const start=Math.min(26,Math.floor(scrollY/180)+1);main.style.top=(start-1)*180+'px';main.querySelectorAll('article').forEach((a,i)=>{a.firstElementChild.textContent='航班 F'+String(start+i).padStart(3,'0');a.querySelector('button').textContent='订票';});}
+  addEventListener('scroll',render);render();
+}else if(mode==='nested'){
+  main.id='nested';main.setAttribute('role','list');append(10);
+}else{
+  append(6);
+  addEventListener('scroll',()=>{
+    if(pending||scrollY+innerHeight<document.documentElement.scrollHeight-4||(mode!=='infinite'&&count>=18))return;
+    pending=true;main.setAttribute('aria-busy','true');
+    setTimeout(()=>{append(6);pending=false;main.removeAttribute('aria-busy');if(mode!=='infinite'&&count===18)main.insertAdjacentHTML('beforeend','<p>已加载全部18个航班</p>');},650);
+  });
+}
+if(mode==='modal')document.body.insertAdjacentHTML('beforeend','<div id="modal" role="dialog"><button>我知道了</button></div>');
+</script>
