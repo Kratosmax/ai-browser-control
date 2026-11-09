@@ -35,6 +35,7 @@ function backgroundHarness(stored = { cdpEnabled: true, screenshotCdpEnabled: tr
       create: async (name, config) => calls.push(['alarm', config]), onAlarm: event('alarm')
     },
     tabs: {
+      create: async (params) => { calls.push(['create', params]); return { id: 9, windowId: params.windowId, active: false }; },
       query: async () => tabs,
       captureVisibleTab: async (windowId) => { calls.push(['capture', windowId]); return 'data:image/png;base64,PNG'; },
       get: async (id) => {
@@ -44,6 +45,7 @@ function backgroundHarness(stored = { cdpEnabled: true, screenshotCdpEnabled: tr
       },
       update: async (id, params) => calls.push(['update', id, params]), onRemoved: event('removed')
     },
+    windows: { get: async (id) => ({ id, focused: false }), getLastFocused: async (params) => { calls.push(['lastWindow', params]); return { id: 1 }; } },
     debugger: {
       attach: async (target, version) => calls.push(['attach', target, version]),
       detach: async (target) => { calls.push(['detach', target]); listeners.detach(target); },
@@ -178,6 +180,25 @@ test('CDP点击按下失败仍尝试释放，组合键失败仍释放修饰键',
   assert(h.run("qaInput.some(p=>p.type==='mouseReleased')"));
   await assert.rejects(h.run("execute({method:'press',params:{tabId:7,key:'Alt+ArrowDown'}})"), /fixture/);
   assert(h.run("qaInput.some(p=>p.type==='keyUp'&&p.key==='Alt'&&p.modifiers===0)"));
+});
+
+test('打开网址强制后台新建，不调用窗口激活，显式窗口继承原页授权校验，无窗口则拒绝', async () => {
+  const h = backgroundHarness({ disconnected: true });
+  await tick();
+  const result = await h.run("execute({method:'open',params:{url:'https://example.test/new'}})");
+  assert.equal(result.tabId, 9); assert.equal(result.active, false); assert.equal(result.authorized, false);
+  assert.equal(result.windowFocusedBefore, false); assert.equal(result.windowFocusedAfter, false);
+  assert.equal(h.calls.find(c => c[0] === 'create')[1].active, false);
+  assert.equal(h.calls.find(c => c[0] === 'create')[1].windowId, 1);
+  await assert.rejects(h.run("execute({method:'open',params:{url:'https://example.test/new',tabId:7}})"), /授权/);
+  await h.run("handlePopup({type:'authorize_tab',tabId:7})");
+  await h.run("execute({method:'open',params:{url:'https://example.test/new',tabId:7}})");
+  assert.equal(h.calls.filter(c => c[0] === 'create').at(-1)[1].openerTabId, 7);
+  h.run("chrome.windows.getLastFocused=async()=>{throw new Error('none')}");
+  const count = h.calls.filter(c => c[0] === 'create').length;
+  await assert.rejects(h.run("execute({method:'open',params:{url:'https://example.test/new'}})"), { code: 'NO_BROWSER_WINDOW' });
+  assert.equal(h.calls.filter(c => c[0] === 'create').length, count);
+  await assert.rejects(h.run("execute({method:'open',params:{url:'file:///C:/secret'}})"), { code: 'INVALID_ARGUMENTS' });
 });
 
 test('后台授权、全部方法、按键映射和撤销', async () => {
@@ -420,7 +441,7 @@ function pageHarness() {
   let nodes = [];
   let hit = null;
   const document = {
-    title: 'Mock page', body: { innerText: '可见文本'.repeat(5000) }, activeElement: null,
+    addEventListener() {}, title: 'Mock page', body: { innerText: '可见文本'.repeat(5000) }, activeElement: null,
     querySelectorAll: selector => (selector === '*' || selector.startsWith('input,textarea,select,button,a,')) ? nodes : [],
     getElementById: () => null,
     elementFromPoint: () => hit
@@ -461,7 +482,7 @@ function pageHarness() {
   return {
     document, Element, HTMLInputElement, HTMLTextAreaElement,
     setNodes: (items) => { nodes = items; }, inject,
-    get agent() { return context.__aiBrowserPageAgent6; }
+    get agent() { return context.__aiBrowserPageAgent7; }
   };
 }
 

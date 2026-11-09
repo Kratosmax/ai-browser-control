@@ -16,6 +16,8 @@
 
 长按不额外补发click；CDP由浏览器处理按下/释放，浏览器本身仍可能生成click。不能承诺长按没有业务副作用，需先确认目标和用户授权。
 
+0.11.0在关联菜单可见时保持视觉光标，并从上一次位置衔接后续移动；DOM点击前先把悬停状态转移到选项。inspect.cursor可回读position/held/visible。视觉保持不派发定时鼠标事件，不阻止网站自己的关闭策略；菜单已关闭时重新hover触发器、wait、snapshot获取新ref，不能点击旧位置或重放结果未知的业务操作。
+
 ## 控件、状态与等待
 
 - focus只取得页面内焦点，不移动系统焦点；press可传ref及expectedContext，避免键盘送给错误控件。支持Shift+Tab、Alt+ArrowDown/Up、Shift+F10、Control+Enter以及原有键；Enter/Control+Enter可能提交。

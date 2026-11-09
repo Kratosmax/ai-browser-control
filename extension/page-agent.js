@@ -2,7 +2,7 @@
   'use strict';
 
   // 注入到隔离世界；重复注入保留当前引用，不接收网页脚本指令。
-  if (globalThis.__aiBrowserPageAgent6) return;
+  if (globalThis.__aiBrowserPageAgent7) return;
 
   let generation = Date.now();
   let refs = new Map();
@@ -375,6 +375,7 @@
   }
 
   function inspect(ref) {
+    syncHoverHold();
     const record = refs.get(ref);
     if (!record) throw new Error('ref无效或已过期，请重新snapshot');
     const element = record.element;
@@ -385,6 +386,7 @@
       identityChanged: identity(descriptor) !== record.identity,
       obscured: Boolean(hit && hit !== element && !element.contains(hit)),
       inViewport: Boolean(rect && rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth) };
+    if (globalThis.__aiBrowserCursor2) state.cursor = globalThis.__aiBrowserCursor2.state();
     if (element instanceof HTMLInputElement) state.inputType = element.type;
     if (element.hasAttribute('aria-controls') || element.hasAttribute('aria-owns')) {
       const roots = `${element.getAttribute('aria-controls') || ''} ${element.getAttribute('aria-owns') || ''}`.split(/\s+/).filter(Boolean)
@@ -402,6 +404,81 @@
   }
 
   let hovered = null;
+  let pointerPosition = null;
+  let hoverOwner = null;
+  let hoverObserver = null;
+  let hoverSyncPending = false;
+
+  function hoverPopups(owner) {
+    const roots = new Set();
+    for (const id of `${owner.getAttribute('aria-controls') || ''} ${owner.getAttribute('aria-owns') || ''}`.split(/\s+/).filter(Boolean)) {
+      const root = document.getElementById(id);
+      if (root) roots.add(root);
+    }
+    // 没有controls的内联菜单，只查触发器附近，不把全页其他菜单关联进来。
+    for (let node = owner.parentElement, depth = 0; node && node !== document.body && depth < 3; node = node.parentElement, depth++) {
+      for (const root of node.querySelectorAll('[role="menu"],[role="listbox"]')) roots.add(root);
+      if (roots.size) break;
+    }
+    return [...roots];
+  }
+
+  function syncHoverHold() {
+    hoverObserver?.disconnect();
+    if (!hoverOwner?.isConnected) {
+      hoverOwner = null;
+      globalThis.__aiBrowserCursor2?.hold(false);
+      return;
+    }
+    const roots = hoverPopups(hoverOwner);
+    globalThis.__aiBrowserCursor2?.hold(roots.some(visible));
+    if (typeof MutationObserver !== 'function') return;
+    hoverObserver ??= new MutationObserver(queueHoverSync);
+    const nodes = new Set();
+    for (const start of [hoverOwner, ...roots]) {
+      for (let node = start; node; node = node.parentElement) nodes.add(node);
+    }
+    for (const node of nodes) hoverObserver.observe(node, { attributes: true, attributeFilter: ['class', 'style', 'hidden', 'aria-hidden', 'aria-expanded'], childList: true });
+  }
+
+  function queueHoverSync() {
+    if (!hoverOwner || hoverSyncPending) return;
+    hoverSyncPending = true;
+    setTimeout(() => { hoverSyncPending = false; syncHoverHold(); }, 0);
+  }
+
+  function holdHover({ ref }) {
+    const element = refs.get(ref)?.element;
+    if (!element?.isConnected) { clearHover(); return { held: false }; }
+    const owner = element.closest('[aria-haspopup]:not([aria-haspopup="false"])');
+    const within = hoverOwner && (hoverOwner.contains(element) || hoverPopups(hoverOwner).some(root => root.contains(element)));
+    if (!within) hoverOwner = null;
+    if (owner) hoverOwner = owner;
+    syncHoverHold();
+    return { held: Boolean(globalThis.__aiBrowserCursor2?.state().held) };
+  }
+
+  async function showCursor(point) {
+    await globalThis.__aiBrowserCursor2.show({ ...point, from: pointerPosition, linear: Boolean(hoverOwner) });
+    pointerPosition = { x: point.x, y: point.y };
+    return { shown: true };
+  }
+
+  function clearHover() {
+    hoverOwner = null;
+    hoverObserver?.disconnect();
+    globalThis.__aiBrowserCursor2?.hold(false);
+  }
+
+  // CSS hover可随真实指针变化，不一定产生DOM属性变化；只在进入/离开事件后核对。
+  document.addEventListener('pointerover', queueHoverSync, true);
+  document.addEventListener('pointerout', queueHoverSync, true);
+  const hoverTransition = event => {
+    if (hoverOwner && (event.target.contains(hoverOwner) || hoverPopups(hoverOwner).some(root =>
+      root.contains(event.target) || event.target.contains(root)))) queueHoverSync();
+  };
+  document.addEventListener('transitionend', hoverTransition, true);
+  document.addEventListener('animationend', hoverTransition, true);
   function mouse(element, type, point, extra = {}) {
     const init = { clientX: point.x, clientY: point.y, bubbles: !/enter|leave/.test(type),
       cancelable: true, composed: true, view: window, ...extra };
@@ -436,13 +513,26 @@
     return hit;
   }
 
-  function domHover({ ref, point }) {
+  async function domHover({ ref, point }) {
+    const element = resolve(ref), before = element.getClientRects()[0];
     hoverAt(pointerTarget(ref, point), point);
-    return { actionDispatched: true, mode: 'dom', trusted: false, cssHover: false };
+    const after = element.getClientRects()[0];
+    // 悬停事件可能关闭旧菜单并重排页面；视觉位置跟随同一个元素，不停在旧坐标的空白处。
+    const aligned = before?.width > 0 && before?.height > 0 && after?.width > 0 && after?.height > 0 ? {
+      x: after.left + after.width * (point.x - before.left) / before.width,
+      y: after.top + after.height * (point.y - before.top) / before.height
+    } : { x: point.x, y: point.y };
+    await globalThis.__aiBrowserCursor2?.show({ ...aligned, animate: false });
+    pointerPosition = aligned;
+    holdHover({ ref });
+    return { actionDispatched: true, mode: 'dom', trusted: false, cssHover: false, position: aligned };
   }
 
   async function pointerClick({ ref, point, button = 'left', clickCount = 1, holdMs = 0 }) {
     const element = pointerTarget(ref, point), right = button === 'right';
+    if (hovered) hoverAt(element, point);
+    pointerPosition = { x: point.x, y: point.y };
+    holdHover({ ref });
     const data = { button: right ? 2 : 0, buttons: right ? 2 : 1 };
     // 普通click保留既有行为；特殊动作才明确派发完整事件序列。
     for (let count = 1; count <= clickCount; count++) {
@@ -534,7 +624,15 @@
   }
 
   async function domClick(ref) {
+    let point = await prepare(ref);
+    if (hovered?.isConnected) hoverAt(pointerTarget(ref, point), point);
+    // 离开旧菜单可能改变布局；派发click前再次核对，并把视觉端点校准到当前目标。
+    point = await prepare(ref);
+    await globalThis.__aiBrowserCursor2?.show({ ...point, animate: false });
+    pointerPosition = { x: point.x, y: point.y };
+    holdHover({ ref });
     resolve(ref).click();
+    syncHoverHold();
     return { clicked: true, mode: 'dom', trusted: false };
   }
 
@@ -603,9 +701,10 @@
     prepare: guarded('prepare', prepare),
     focus: guarded('focus', focus),
     focusTarget: guarded('focusTarget', focusTarget),
-    showCursor: guarded('showCursor', point => globalThis.__aiBrowserCursor.show(point)),
-    cursorPulse: guarded('cursorPulse', point => globalThis.__aiBrowserCursor.click(point)),
-    hideCursor: guarded('hideCursor', () => { globalThis.__aiBrowserCursor?.hide(); return { hidden: true }; }),
+    showCursor: guarded('showCursor', showCursor),
+    holdHover: guarded('holdHover', holdHover),
+    cursorPulse: guarded('cursorPulse', point => globalThis.__aiBrowserCursor2.click(point)),
+    hideCursor: guarded('hideCursor', () => { clearHover(); globalThis.__aiBrowserCursor2?.hide(); return { hidden: true }; }),
     domClick: guarded('domClick', domClick),
     domHover: guarded('domHover', domHover),
     pointerClick: guarded('pointerClick', pointerClick),
@@ -616,7 +715,7 @@
     domPress: guarded('domPress', domPress)
   };
 
-  Object.defineProperty(globalThis, '__aiBrowserPageAgent6', {
+  Object.defineProperty(globalThis, '__aiBrowserPageAgent7', {
     value: Object.freeze(agent),
     configurable: false,
     writable: false

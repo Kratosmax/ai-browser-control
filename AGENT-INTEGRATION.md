@@ -6,6 +6,8 @@
 
 0.10.0提供17个工具，工具目录与桥参数校验共用server/protocol.mjs。接入后核对hover/focus/drag/select/set_checked/inspect/wait是否存在，以及click的button/clickCount/holdMs/position、press的ref/组合键参数；旧会话目录需按客户端方式重连，不自行包装HTTP或MCP。菜单、状态和结果验收按仓库技能的[特殊交互参考](skills/ai-browser-control/references/interactions.md)。
 
+0.11.0新增browser_open，共18个工具。新开指定网址默认后台，不激活窗口；原browser_navigate仅导航已有页。更新后核对工具目录出现browser_open；只更新扩展不能刷新客户端缓存的MCP目录。不要为此缺口静默改用会拉起前台浏览器的其他入口。
+
 1. 查明现有 Node.js 22+ 的绝对路径和仓库绝对路径。
 2. 查接入客户端的官方文档或 `--help`，确认 MCP 配置位置、stdio 格式和生效方式。
 3. 先查已有 `ai-browser-` 条目；主机和端口相同则复用，避免重复接入。

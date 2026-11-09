@@ -130,7 +130,7 @@ try:
             page.evaluate('scrollTo(0,600)')
             page.locator('#b').evaluate("e=>e.style.left='180px'")
             js = isolated(page, old)
-            agent = '__zcodeTabAgent' if old else '__aiBrowserPageAgent6'
+            agent = '__zcodeTabAgent' if old else '__aiBrowserPageAgent7'
             snap = js(f'{agent}.snapshot()')
             refs = [item['ref'] for item in snap['elements'] if item['tag'] == 'button']
             points = [js(f'{agent}.prepare({json.dumps(ref)})') for ref in refs]
@@ -141,15 +141,20 @@ try:
         check('视口内定位不再强制居中', coordinates)
         page.locator('#b').evaluate("e=>e.style.left='740px'")
 
+        initial_cursor = js('(async()=>{const result=await __aiBrowserCursor2.show({x:40,y:50});return {result,state:__aiBrowserCursor2.state()}})()')
+        assert initial_cursor['result']['animated'] is False
+        assert initial_cursor['state']['position'] == {'x': 40, 'y': 50}
+        check('首次光标没有虚构偏移起点', initial_cursor)
+
         # 闭合 Shadow DOM + ISOLATED 世界中，用实际帧循环采样，不用返回值冒充视觉验收。
-        samples = js('''(async()=>{await __aiBrowserCursor.show({x:210,y:280});let done=false;const samples=[];
-          const work=__aiBrowserCursor.show({x:800,y:500}).then(()=>done=true);
+        samples = js('''(async()=>{await __aiBrowserCursor2.show({x:210,y:280});let done=false;const samples=[];
+          const work=__aiBrowserCursor2.show({x:800,y:500}).then(()=>done=true);
           while(!done){await new Promise(requestAnimationFrame);const m=new DOMMatrixReadOnly(getComputedStyle(__qaRoots[0].getElementById('pointer')).transform);samples.push({x:m.m41,y:m.m42,time:performance.now()});}
           await work;return samples;})()''')
         assert len({round(item['x']) for item in samples}) >= 6, samples
         assert abs(samples[-1]['x'] - 800) < 1
         check('真实 Edge 动画中间帧', samples)
-        js('__aiBrowserCursor.show({x:235,y:275})')
+        js('__aiBrowserCursor2.show({x:235,y:275})')
         stream = page.context.new_cdp_session(page)
         recorded = []
         recording = True
@@ -168,7 +173,7 @@ try:
         stream.send('Page.startScreencast', {'format': 'png', 'maxWidth': 1100, 'maxHeight': 750, 'everyNthFrame': 1})
         page.wait_for_timeout(100)
         for point in [{'x': 795, 'y': 505}, {'x': 235, 'y': 275}]:
-            js('__aiBrowserCursor.show(' + json.dumps(point) + ').then(()=>__aiBrowserCursor.click(' + json.dumps(point) + '))')
+            js('__aiBrowserCursor2.show(' + json.dumps(point) + ').then(()=>__aiBrowserCursor2.click(' + json.dumps(point) + '))')
             page.wait_for_timeout(300)
         recording = False
         stream.remove_listener('Page.screencastFrame', on_frame)
@@ -185,7 +190,7 @@ try:
 
         # 静止后无持续 rAF；默认 10 秒，使用真实计时，包含最后一次点击重置计时。
         js('globalThis.__qaRafCount=0;const oldRaf=requestAnimationFrame;globalThis.requestAnimationFrame=f=>{__qaRafCount++;return oldRaf(f)};')
-        js('__aiBrowserCursor.show({x:800,y:500,hideMs:10000}).then(()=>__aiBrowserCursor.click({x:800,y:500,hideMs:10000}))')
+        js('__aiBrowserCursor2.show({x:800,y:500,hideMs:10000}).then(()=>__aiBrowserCursor2.click({x:800,y:500,hideMs:10000}))')
         js('globalThis.__idleCount=__qaRafCount')
         page.wait_for_timeout(450)
         assert js('__qaRafCount===__idleCount')
@@ -194,14 +199,39 @@ try:
         page.wait_for_timeout(1400)
         assert js("getComputedStyle(__qaRoots[0].getElementById('surface')).opacity") == '0'
         check('10 秒停留及静止后停止帧循环', {'visibleAtSeconds': 8.95, 'hiddenAtSeconds': 10.35, 'idleRafCount': js('__qaRafCount')})
-        js('__aiBrowserCursor.show({x:200,y:200,hideMs:0})')
+        js('__aiBrowserCursor2.show({x:200,y:200,hideMs:0})')
         page.wait_for_timeout(220)
         assert js("getComputedStyle(__qaRoots[0].getElementById('surface')).opacity") == '0'
         check('0 秒设置实际生效', True)
 
+        continuity = js('''(async()=>{await __aiBrowserCursor2.show({x:120,y:180,animate:false,hideMs:100});__aiBrowserCursor2.hold(true);
+          await new Promise(r=>setTimeout(r,350));const held=__aiBrowserCursor2.state();let done=false;const samples=[];
+          const work=__aiBrowserCursor2.show({x:420,y:480,from:{x:120,y:180},linear:true,hideMs:100}).then(()=>done=true);
+          samples.push(__aiBrowserCursor2.state().position);
+          while(!done){await new Promise(requestAnimationFrame);samples.push(__aiBrowserCursor2.state().position)}
+          await work;__aiBrowserCursor2.hold(false);await new Promise(r=>setTimeout(r,300));
+          return {held,samples,after:__aiBrowserCursor2.state()};})()''')
+        assert continuity['held']['held'] and continuity['held']['visible']
+        assert continuity['samples'][0] == {'x': 120, 'y': 180}
+        assert all(abs((p['x'] - 120) - (p['y'] - 180)) < 1 for p in continuity['samples'])
+        assert continuity['after']['visible'] is False and continuity['after']['position'] == {'x': 420, 'y': 480}
+        check('悬停保持、从上个位置直线衔接、解除后恢复隐藏', continuity)
+
+        fade_hold = js('''(async()=>{const trigger=document.createElement('button'),menu=document.createElement('div');
+          trigger.textContent='保持测试';trigger.setAttribute('aria-haspopup','menu');trigger.setAttribute('aria-controls','qa-fading-menu');
+          trigger.style.cssText='position:fixed;left:20px;top:20px';menu.id='qa-fading-menu';menu.setAttribute('role','menu');
+          menu.textContent='测试选项';menu.style.cssText='position:fixed;left:20px;top:80px;opacity:1;transition:opacity 120ms';
+          document.body.append(trigger,menu);const snap=await __aiBrowserPageAgent7.snapshot({load:'current'});
+          const ref=snap.elements.find(e=>e.name==='保持测试').ref;const p=await __aiBrowserPageAgent7.prepare(ref);
+          await __aiBrowserPageAgent7.showCursor({...p,animate:false,hideMs:1000});await __aiBrowserPageAgent7.domHover({ref,point:p});
+          const held=__aiBrowserCursor2.state().held;menu.style.opacity='0';await new Promise(r=>setTimeout(r,350));
+          const after=__aiBrowserCursor2.state().held;trigger.remove();menu.remove();return {held,after};})()''')
+        assert fade_hold == {'held': True, 'after': False}
+        check('菜单淡出完成后自动解除光标保持', fade_hold)
+
         # 轨迹与光标独立计时：光标立即隐藏，移动路径保留5秒。
-        js('__aiBrowserCursor.hide();__aiBrowserCursor.show({x:120,y:250,hideMs:0,trailMs:0})')
-        js('__aiBrowserCursor.show({x:820,y:520,hideMs:0,trailMs:5000}).then(()=>globalThis.__qaTrailEnd=performance.now())')
+        js('__aiBrowserCursor2.hide();__aiBrowserCursor2.show({x:120,y:250,hideMs:0,trailMs:0})')
+        js('__aiBrowserCursor2.show({x:820,y:520,hideMs:0,trailMs:5000}).then(()=>globalThis.__qaTrailEnd=performance.now())')
         page.wait_for_timeout(220)
         assert js("getComputedStyle(__qaRoots[0].getElementById('surface')).opacity") == '0'
         assert js("__qaRoots[0].querySelectorAll('#trails path').length") == 1
@@ -211,28 +241,28 @@ try:
         assert js("__qaRoots[0].querySelectorAll('#trails path').length") == 1
         page.wait_for_timeout(max(0, 5300 - js('performance.now()-__qaTrailEnd')))
         assert js("__qaRoots[0].querySelectorAll('#trails path').length") == 0
-        js('__aiBrowserCursor.show({x:200,y:200,hideMs:0,trailMs:0})')
+        js('__aiBrowserCursor2.show({x:200,y:200,hideMs:0,trailMs:0})')
         assert js("__qaRoots[0].querySelectorAll('#trails path').length") == 0
         check('独立轨迹5秒残留、回收及0秒关闭', {'pointerHiddenImmediately': True, 'trailAt4500ms': True, 'removedAt5300ms': True})
 
         # 模拟后台可见性仅验证调度分支；实际扩展后台标签另由集成验收覆盖。
-        elapsed = js("(async()=>{Object.defineProperty(document,'visibilityState',{configurable:true,get:()=> 'hidden'});const start=performance.now();const result=await __aiBrowserCursor.show({x:100,y:120});delete document.visibilityState;return {elapsed:performance.now()-start,result};})()")
+        elapsed = js("(async()=>{Object.defineProperty(document,'visibilityState',{configurable:true,get:()=> 'hidden'});const start=performance.now();const result=await __aiBrowserCursor2.show({x:100,y:120});delete document.visibilityState;return {elapsed:performance.now()-start,result};})()")
         assert elapsed['elapsed'] < 50 and elapsed['result']['animated'] is False
         check('后台分支不等待动画（可见性模拟）', elapsed)
 
-        snap = js('__aiBrowserPageAgent6.snapshot()')
+        snap = js('__aiBrowserPageAgent7.snapshot()')
         text_ref = next(item['ref'] for item in snap['elements'] if item['name'] == '测试输入')
-        result = js('__aiBrowserPageAgent6.domFill(' + json.dumps({'ref': text_ref, 'text': 'DOM 模式输入成功'}) + ')')
+        result = js('__aiBrowserPageAgent7.domFill(' + json.dumps({'ref': text_ref, 'text': 'DOM 模式输入成功'}) + ')')
         assert result.get('filled')
         assert page.locator('#text').input_value() == 'DOM 模式输入成功'
         assert {item['type'] for item in page.evaluate('events')} == {'input', 'change'}
         button_ref = next(item['ref'] for item in snap['elements'] if item['name'] == '左侧操作')
-        js(f'__aiBrowserPageAgent6.domClick({json.dumps(button_ref)})')
+        js(f'__aiBrowserPageAgent7.domClick({json.dumps(button_ref)})')
         assert page.locator('output').inner_text() == '1'
         check('真实 DOM 填表/点击及 input/change 事件', page.evaluate('events'))
 
         page.emulate_media(reduced_motion='reduce')
-        reduced = js('__aiBrowserCursor.show({x:800,y:500})')
+        reduced = js('__aiBrowserCursor2.show({x:800,y:500})')
         assert reduced['animated'] is False
         check('遵守系统减少动态效果偏好', reduced)
 
@@ -245,12 +275,12 @@ try:
             '<div role="dialog" style="position:fixed;inset:0;background:#0008;display:grid;place-items:center"><button onclick="this.parentElement.remove()">我知道了</button></div>';
         }''')
         modal_js = isolated(modal_page)
-        modal_snap = modal_js('__aiBrowserPageAgent6.snapshot()')
+        modal_snap = modal_js('__aiBrowserPageAgent7.snapshot()')
         close_ref = next(item['ref'] for item in modal_snap['elements'] if item['tag'] == 'button' and item['name'] == '我知道了')
         assert len(modal_snap['elements']) == 150
         assert modal_snap['coverage']['selectionPriority'] == 'viewport-first'
         modal_page.screenshot(path=str(OUT / 'viewport-modal.png'))
-        modal_js('__aiBrowserPageAgent6.domClick(' + json.dumps(close_ref) + ')')
+        modal_js('__aiBrowserPageAgent7.domClick(' + json.dumps(close_ref) + ')')
         assert modal_page.locator('[role=dialog]').count() == 0
         check('180个离屏控件后仍可定位并关闭屏内弹窗', modal_snap['coverage'])
         modal_page.close()

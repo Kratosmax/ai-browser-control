@@ -2,7 +2,7 @@
 
 让支持 MCP 的 AI 助手按标签页读取和操作真实 Edge / Chrome。后台操作不切换标签页、不移动系统鼠标。
 
-当前源码版本：0.10.1。包含0.10.0的菜单与特殊交互、状态检查及有条件等待，并修复展开菜单中非标准选项没有ref的问题；保留0.9.1的连接恢复和有界日志。通过仓库更新获取，未创建对应 GitHub Release。
+当前源码版本：0.11.0。新增指定网址后台打开接口，并修正悬停菜单的光标保持和连续点击衔接；包含此前菜单识别、连接恢复及有界日志。通过仓库更新获取，未创建对应 GitHub Release。
 
 ## 开始使用
 
@@ -43,6 +43,7 @@
 - 目标在视口内时不强制滚到中央。移动完成后重新验证目标位置和遮挡，再执行点击。
 - 可见页面移动约 160–320ms；隐藏页面直接定位，不等待装饰动画。
 - 默认在最后一次操作结束 10 秒后淡出，可设 0–60 秒。
+- 关联的悬停菜单可见期间保持光标；菜单关闭后恢复隐藏计时。首次显示直接出现在目标，后续从上次位置衔接，菜单内使用直线路径。0秒隐藏选择仍生效，轨迹时间独立。保持只影响视觉反馈，不修改网站菜单样式或阻止网站自行关闭。
 - 移动经过的蓝色轨迹独立保留，默认 5 秒、可设 0–60 秒；0 为关闭。光标先隐藏也不会提前清掉轨迹。高频连续操作最多保留 64 段，超出时回收最旧一段。
 - 静止后停止帧循环；遵守系统“减少动态效果”设置。
 
@@ -66,12 +67,15 @@
 | browser_navigate | 导航到明确的 HTTP(S) 地址 |
 | browser_screenshot | 按独立截图开关选择 CDP 或当前页截图 |
 | browser_release | 释放此页，自动授权模式下也生效 |
+| browser_open | 把指定HTTP(S)网址在已有窗口中新建为后台标签页，不激活窗口 |
 
 每次快照刷新 ref。动作后重新读取快照确认；超时不等于失败，不直接重复提交、支付或发送。快照不读取 Cookie、localStorage 或浏览历史，也不输出密码框的值。
 
 0.10.0提供17个工具。click支持button=right、clickCount=2、holdMs和position相对位置；press支持ref聚焦和Shift+Tab、Alt+ArrowDown/Up、Shift+F10、Control+Enter。快照增加disabled/focused/checked/selected/hasPopup/controls/busy，inspect可读遮挡、位置和原生select选项；wait最长5秒。DOM悬停不支持纯CSS :hover，CDP真实交互沿用原开关并保留保存值。完整流程与边界见[特殊交互与状态](skills/ai-browser-control/references/interactions.md)。
 
 0.10.1把tabindex控件，以及由aria-haspopup+controls/owns关联或具备menu/listbox角色的可见弹层内列表项、自绘指针项纳入定位。快照标记inPopup并优先保留这些选项；没有标准role的选项仍按真实角色返回，不虚构menuitem。inspect触发器可见关联popups状态和候选项数。此为DOM候选识别，不等于所有列表项都必然绑定了点击处理器。
+
+0.11.0共18个工具。AI要新开用户指定网址时用browser_open(url)，可选已有授权tabId确定所属窗口；不传则用最近普通窗口。创建固定active=false，不调用窗口激活或新建窗口；没有窗口则报错，需用户手动打开。回执包含新tabId、实际active、窗口focus前后状态和授权状态，后续按新tabId读取；自动授权关闭时不擅自授权新页。browser_navigate仍用于已有页。网页按钮自行window.open或用户手动新建页面不由此接口改写。
 
 当前范围：主文档普通 DOM、同源 iframe 正文；跨域 iframe、封闭 Shadow DOM、canvas 内部控件和系统文件选择框不支持。动态页面内容尚未出现时稍后重新读取，不把短文档当成错误。
 
@@ -182,7 +186,7 @@ Python 项仅供开发验收，依赖测试机已有 Python Playwright、Pillow 
 
 主要入口：
 
-- `server/mcp.mjs`：MCP stdio；`server/protocol.mjs`：17个工具与共用参数校验；`server/bridge.mjs`：指令队列、来源校验、远程 token。
+- `server/mcp.mjs`：MCP stdio；`server/protocol.mjs`：18个工具与共用参数校验；`server/bridge.mjs`：指令队列、来源校验、远程 token。
 - `extension/background.js`：授权、CDP/DOM 路由、结果重传。
 - `extension/page-agent.js`：DOM 快照、ref、定位与 DOM 操作；`extension/cursor.js`：光标与动效。
 - `extension/popup.*`：弹窗；`install.mjs`：桥管理、更新及旧注册兼容。

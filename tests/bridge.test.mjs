@@ -200,8 +200,8 @@ test('MCP stdio 握手、工具目录和错误响应', async () => {
   assert.equal(replies.find(x => x.id === 1).result.serverInfo.name, 'ai-browser-17653');
   assert.equal(replies.find(x => x.id === 1).result.serverInfo.version, JSON.parse(await fs.readFile(path.join(root, '.zcode-plugin', 'plugin.json'), 'utf8')).version);
   const tools = replies.find(x => x.id === 2).result.tools;
-  assert.equal(tools.length, 17);
-  assert.equal(new Set(tools.map(x => x.name)).size, 17);
+  assert.equal(tools.length, 18);
+  assert.equal(new Set(tools.map(x => x.name)).size, 18);
   assert.equal(tools.find(x => x.name === 'browser_snapshot').inputSchema.properties.load.default, 'auto');
   assert(tools.find(x => x.name === 'browser_scroll'));
   assert.equal(replies.find(x => x.id === 3).result.isError, true);

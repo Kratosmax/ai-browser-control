@@ -107,6 +107,23 @@ try:
                 target = next(tab for tab in tabs if tab['url'] == base)
                 tab_id = target['id']
                 assert target['authorized']
+                active_before_open = [t['id'] for t in worker.evaluate('chrome.tabs.query({active:true})')]
+                focus_before_open = {w['id']: w['focused'] for w in worker.evaluate('chrome.windows.getAll()')}
+                worker.evaluate("()=>{globalThis.qaTabActivations=[];chrome.tabs.onActivated.addListener(info=>qaTabActivations.push(info.tabId))}")
+                opened = tool('browser_open', {'url': base + '?background-open=1', 'tabId': tab_id})
+                assert opened['active'] is False and opened['requestedActive'] is False
+                assert opened['windowFocusedBefore'] == focus_before_open[opened['windowId']]
+                assert opened['windowFocusedAfter'] == focus_before_open[opened['windowId']]
+                assert worker.evaluate(f'chrome.tabs.get({opened["tabId"]})')['active'] is False
+                assert [t['id'] for t in worker.evaluate('chrome.tabs.query({active:true})')] == active_before_open
+                assert {w['id']: w['focused'] for w in worker.evaluate('chrome.windows.getAll()')} == focus_before_open
+                assert worker.evaluate('qaTabActivations') == []
+                assert 'Magpie' in tool('browser_snapshot', {'tabId': opened['tabId'], 'load': 'current'})['title']
+                opened_default = tool('browser_open', {'url': base + '?background-open=2'})
+                assert opened_default['windowId'] == opened['windowId'] and opened_default['active'] is False
+                assert worker.evaluate('qaTabActivations') == []
+                worker.evaluate(f'chrome.tabs.remove([{opened["tabId"]},{opened_default["tabId"]}])')
+                report['checks'].append({'name': '指定网址默认后台新建，18工具链路读取成功，原选中页与窗口focused状态不变且无onActivated事件', 'passed': True})
                 snap = tool('browser_snapshot', {'tabId': tab_id})
                 assert 'Magpie' in snap['title']
                 assert snap['coverage']['scope'] == 'loaded-dom'
@@ -215,9 +232,9 @@ try:
                 tool('browser_navigate', {'tabId': tab_id, 'url': base + 'interactions'})
                 page.wait_for_url('**/interactions')
 
-                def pick(name):
+                def pick(name, role=None):
                     current = tool('browser_snapshot', {'tabId': tab_id, 'load': 'current'})
-                    matches = [e for e in current['elements'] if e['name'] == name]
+                    matches = [e for e in current['elements'] if e['name'] == name and (role is None or e['role'] == role)]
                     assert len(matches) == 1, (name, matches)
                     return matches[0]['ref']
 
@@ -225,6 +242,25 @@ try:
                 assert hover['outcome'] == 'unverified' and hover['cssHover'] is False
                 assert tool('browser_wait', {'tabId': tab_id, 'name': '悬停选项', 'role': 'menuitem', 'timeoutMs': 1000})['matched']
                 assert page.locator('#hovermenu').is_visible()
+                portal_trigger = pick('跨容器悬停菜单')
+                portal_hover = tool('browser_hover', {'tabId': tab_id, 'ref': portal_trigger})
+                assert portal_hover['cursorHeld']
+                before_menu_click = tool('browser_inspect', {'tabId': tab_id, 'ref': portal_trigger})
+                assert abs(before_menu_click['cursor']['position']['x'] - (before_menu_click['rect']['x'] + before_menu_click['rect']['width'] / 2)) < 2
+                assert abs(before_menu_click['cursor']['position']['y'] - (before_menu_click['rect']['y'] + before_menu_click['rect']['height'] / 2)) < 2
+                page.wait_for_timeout(11050)
+                after_idle = tool('browser_inspect', {'tabId': tab_id, 'ref': portal_trigger})
+                assert page.locator('#portalMenu').is_visible()
+                assert after_idle['cursor']['held'] and after_idle['cursor']['visible']
+                assert after_idle['cursor']['position'] == before_menu_click['cursor']['position']
+                page.screenshot(path=str(OUT / 'hover-menu-held-after-11s.png'))
+                portal_option = pick('跨容器选项', 'menuitem')
+                tool('browser_click', {'tabId': tab_id, 'ref': portal_option})
+                assert page.locator('#result').inner_text() == '跨容器选择成功'
+                assert page.evaluate('menuEvents')[-3:] == ['trigger-leave', 'option-enter', 'option-click']
+                portal_after = tool('browser_inspect', {'tabId': tab_id, 'ref': portal_option})
+                assert portal_after['cursor']['held'] is False
+                report['checks'].append({'name': '悬停菜单与光标停留11秒不消失；跨容器点击前DOM悬停进入选项，关闭后解除保持', 'passed': True})
                 tool('browser_hover', {'tabId': tab_id, 'ref': pick('无语义菜单')})
                 assert tool('browser_wait', {'tabId': tab_id, 'name': '普通列表菜单项', 'timeoutMs': 1000})['matched']
                 page.evaluate("""()=>{let noise=document.createElement('div');noise.id='noise';noise.innerHTML=Array(180).fill('<button style="position:fixed;left:1098px;top:798px;width:1px;height:1px;padding:0;margin:0">干扰按钮</button>').join('');document.body.prepend(noise)}""")
@@ -335,10 +371,10 @@ try:
                 assert any(e['event'] == 'command_deliver' and e['id'] == timeout['commandId'] for e in lines)
                 assert any(e['event'] == 'extension_event' and e['diagnostic'].get('commandId') == timeout['commandId'] and e['diagnostic'].get('outcome') == 'timeout' for e in lines)
                 status = tool('browser_status')
-                assert status['version'] == manifest['version'] == status['extensionVersion'] == '0.10.1'
+                assert status['version'] == manifest['version'] == status['extensionVersion'] == '0.11.0'
                 assert len(diagnostics) <= 128 and len(json.dumps(diagnostics)) <= 65536
                 (OUT / 'diagnostics-real-edge.json').write_text(json.dumps({'status': status, 'timeout': timeout, 'events': lines}, ensure_ascii=False, indent=2), encoding='utf-8')
-                report['checks'].append({'name': '真实Edge诊断跨命令ID关联派发/悬挂prepare/超时、存储有界、桥与扩展版本0.10.1一致', 'passed': True})
+                report['checks'].append({'name': '真实Edge诊断跨命令ID关联派发/悬挂prepare/超时、存储有界、桥与扩展版本0.11.0一致', 'passed': True})
 
                 # 停止临时桥模拟网络中断；独立弹窗必须变为异常/正在连接，并自动恢复。
                 popup = context.new_page()

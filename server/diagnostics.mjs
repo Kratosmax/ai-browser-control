@@ -42,10 +42,10 @@ export function createLogger(dir, { maxBytes = LOG_MAX_BYTES, backups = LOG_BACK
 const EVENTS = new Set(['worker_start', 'connection_reset', 'pair_start', 'pair_ok', 'poll_ok', 'transport_error',
   'manual_connect', 'manual_disconnect', 'command_start', 'command_end', 'step_start', 'step_end', 'status_failed']);
 const METHODS = new Set(['status', ...SUPPORTED_METHODS]);
-const PHASES = new Set(['queue', 'tabs.get', 'tabs.query', 'tabs.update', 'tabs.captureVisibleTab', 'debugger.attach',
+const PHASES = new Set(['queue', 'tabs.get', 'tabs.query', 'tabs.update', 'tabs.create', 'windows.get', 'windows.getLastFocused', 'tabs.captureVisibleTab', 'debugger.attach',
   'debugger.detach', 'scripting.inject', 'snapshot', 'scroll', 'inspect', 'prepare', 'focus', 'focusTarget',
   'showCursor', 'cursorPulse', 'hideCursor', 'domClick', 'domFill', 'domPress',
-  'domHover', 'pointerClick', 'domDrag', 'select', 'waitFor',
+  'domHover', 'holdHover', 'pointerClick', 'domDrag', 'select', 'waitFor',
   'Input.dispatchMouseEvent', 'Input.dispatchKeyEvent', 'Input.insertText', 'Page.captureScreenshot']);
 
 // 只接受固定元数据；错误正文、网页地址、输入内容等不能进入日志。

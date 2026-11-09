@@ -3,6 +3,8 @@
 <section><div id="hoverwrap"><button id="hover" aria-haspopup="menu">悬停菜单</button><div id="hovermenu" role="menu" class="menu" hidden><button role="menuitem">悬停选项</button></div></div>
 <div id="csswrap"><button aria-haspopup="menu">CSS菜单</button><div class="cssmenu" role="menu"><button role="menuitem">CSS选项</button></div></div></section>
 <section><button id="plain" aria-haspopup="list" aria-controls="plainmenu">无语义菜单</button><ul id="plainmenu" hidden><li tabindex="-1">可聚焦菜单项</li><li>普通列表菜单项</li><div style="cursor:pointer">自绘菜单项</div></ul></section>
+<section><button id="portalTrigger" aria-haspopup="menu" aria-controls="portalMenu">跨容器悬停菜单</button></section>
+<div id="portalMenu" role="menu" hidden style="position:absolute;left:30px;top:80px;z-index:5;background:white;border:1px solid #789"><button role="menuitem" id="portalOption">跨容器选项</button></div>
 <section><button id="right">右键菜单</button><button id="double">双击菜单</button><button id="hold">长按菜单</button><div id="special" role="menu" hidden><button role="menuitem">特殊选项</button></div></section>
 <section><input id="key" aria-label="键盘菜单"><button id="next">焦点下一项</button><div id="keymenu" role="menu" hidden><button role="menuitem">键盘选项</button></div></section>
 <section><div id="split" role="button" aria-label="分裂创建"><span>分裂创建</span><span id="arrow">▾</span></div><div id="splitmenu" role="menu" hidden><button role="menuitem">箭头选项</button></div></section>
@@ -14,11 +16,17 @@
 <output id="result">就绪</output>
 <script>
 window.counts={check:0,main:0,holdClick:0,drop:0,pointerDrop:0};
+window.menuEvents=[];
 const q=id=>document.getElementById(id);
 q('hoverwrap').addEventListener('mouseenter',()=>q('hovermenu').hidden=false);
 q('hoverwrap').addEventListener('mouseleave',()=>q('hovermenu').hidden=true);
 q('plain').addEventListener('mouseenter',()=>q('plainmenu').hidden=false);
 q('plainmenu').onclick=e=>{q('result').textContent=e.target.textContent};
+q('portalTrigger').addEventListener('mouseenter',()=>{q('portalMenu').hidden=false;menuEvents.push('trigger-enter')});
+q('portalTrigger').addEventListener('mouseleave',e=>{menuEvents.push('trigger-leave');if(!q('portalMenu').contains(e.relatedTarget))q('portalMenu').hidden=true});
+q('portalOption').addEventListener('mouseenter',()=>menuEvents.push('option-enter'));
+q('portalOption').addEventListener('click',()=>{menuEvents.push('option-click');q('portalMenu').hidden=true;q('result').textContent='跨容器选择成功'});
+q('portalMenu').addEventListener('mouseleave',e=>{if(!q('portalTrigger').contains(e.relatedTarget))q('portalMenu').hidden=true});
 q('right').addEventListener('contextmenu',e=>{e.preventDefault();q('special').hidden=false;q('result').textContent='右键已展开'});
 q('double').addEventListener('dblclick',()=>{q('special').hidden=false;q('result').textContent='双击已展开'});
 let timer;q('hold').addEventListener('pointerdown',()=>{timer=setTimeout(()=>{q('special').hidden=false;q('result').textContent='长按已展开'},150)});

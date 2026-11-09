@@ -5,6 +5,7 @@ import { validateCommand, tools } from '../server/protocol.mjs';
 test('交互参数覆盖ref按键、等待、分裂按钮、拖拽与状态设置，并拒绝无界或含糊请求', () => {
   for (const [method, params] of [
     ['hover', { tabId: 7, ref: 'r1-1', durationMs: 0 }],
+    ['open', { url: 'https://example.test/' }], ['open', { tabId: 7, url: 'https://example.test/' }],
     ['click', { tabId: 7, ref: 'r1-1', button: 'right' }],
     ['click', { tabId: 7, ref: 'r1-1', position: { x: .95, y: .5 } }],
     ['drag', { tabId: 7, fromRef: 'r1-1', toRef: 'r1-2' }],
@@ -15,6 +16,7 @@ test('交互参数覆盖ref按键、等待、分裂按钮、拖拽与状态设�
   ]) assert.equal(validateCommand(method, params).method, method);
   for (const [method, params] of [
     ['hover', { tabId: 7, ref: 'r1-1', durationMs: 60000 }],
+    ['open', { url: 'https://example.test/', active: true }],
     ['click', { tabId: 7, ref: 'r1-1', position: { x: -1, y: .5 } }],
     ['click', { tabId: 7, ref: 'r1-1', clickCount: 2, holdMs: 100 }],
     ['wait', { tabId: 7 }], ['wait', { tabId: 7, ref: 'r1-1', text: '猜测' }],

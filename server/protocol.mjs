@@ -29,6 +29,7 @@ export const tools = [
   tool('fill', '替换文本框或可编辑元素内容，不提交；完成后回读验证。', { tabId, ref, text: { type: 'string', maxLength: 100000 } }, ['tabId', 'ref', 'text']),
   tool('press', '可先按ref聚焦，再发送按键/组合键。Enter、Control+Enter可能提交表单，必须遵守用户授权；DOM按键不保证浏览器默认行为。', { ...target, key: { type: 'string', enum: PRESS_KEYS } }, ['tabId', 'key']),
   tool('navigate', '在指定授权页导航到HTTP(S) URL，不激活标签页，导航后重新snapshot。', { tabId, url: { type: 'string', maxLength: 16000 } }, ['tabId', 'url']),
+  tool('open', '把用户指定的HTTP(S)网址在已有浏览器窗口中新建为后台标签页，active=false，不激活窗口。可传已有授权tabId选择所属窗口；不传则使用最近的普通窗口。没有窗口时报错，不新建或拉起窗口。返回新tabId及实际授权状态；后续按新tabId读取。网站按钮自行window.open不由此接口拦截。', { tabId, url: { type: 'string', maxLength: 16000 } }, ['url']),
   tool('screenshot', '截图不切页；独立截图CDP默认允许，完成后解除临时附加。关闭截图CDP后仅截当前选中页，需用户授予activeTab。', { tabId }, ['tabId']),
   tool('release', '释放指定页授权和调试器，不关闭页面。', { tabId }, ['tabId'])
 ];
@@ -55,7 +56,7 @@ export function validateCommand(method, params = {}) {
   const definition = tools.find(t => t.name === `browser_${method}` && method !== 'status');
   if (!definition) throw Object.assign(new Error('不支持的浏览器命令'), { code: 'UNSUPPORTED_METHOD' });
   validate(params, definition.inputSchema, method);
-  if (method === 'navigate' && !['http:', 'https:'].includes(new URL(params.url).protocol)) throw new Error('只允许HTTP/HTTPS地址');
+  if (['navigate', 'open'].includes(method) && !['http:', 'https:'].includes(new URL(params.url).protocol)) throw new Error('只允许HTTP/HTTPS地址');
   if (method === 'wait' && (!(params.ref || params.text || params.name) || (params.ref && (params.text || params.name || params.role)))) throw Object.assign(new Error('wait需要明确的ref或文本/名称条件'), { code: 'INVALID_ARGUMENTS' });
   if (method === 'click' && params.holdMs && params.clickCount === 2) throw Object.assign(new Error('长按不能同时双击'), { code: 'INVALID_ARGUMENTS' });
   return { method, params };

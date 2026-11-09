@@ -210,7 +210,7 @@ async function pageAgent(tabId, operation, ref, check = () => {}) {
     target: { tabId },
     world: 'ISOLATED',
     func: (name, elementRef) => {
-      const agent = globalThis.__aiBrowserPageAgent6;
+      const agent = globalThis.__aiBrowserPageAgent7;
       if (!agent) throw new Error('页面代理未就绪');
       if (name === 'snapshot') return agent.snapshot(elementRef);
       if (name === 'scroll') return agent.scroll(elementRef);
@@ -219,6 +219,7 @@ async function pageAgent(tabId, operation, ref, check = () => {}) {
       if (name === 'focus') return agent.focus(elementRef);
       if (name === 'focusTarget') return agent.focusTarget(elementRef);
       if (name === 'showCursor') return agent.showCursor(elementRef);
+      if (name === 'holdHover') return agent.holdHover(elementRef);
       if (name === 'cursorPulse') return agent.cursorPulse(elementRef);
       if (name === 'hideCursor') return agent.hideCursor();
       if (name === 'domClick') return agent.domClick(elementRef);
@@ -378,6 +379,25 @@ async function execute(command, check = () => {}) {
     return { bridge: `http://127.0.0.1:${bridgePort}`, port: bridgePort, autoAuthorize, authorizedTabIds: [...authorized] };
   }
   if (method === 'list_tabs') return listTabs(check);
+  if (method === 'open') {
+    if (typeof params.url !== 'string' || !isHttpUrl(params.url)) throw Object.assign(new Error('url必须是HTTP(S)地址'), { code: 'INVALID_ARGUMENTS' });
+    let windowId;
+    if (params.tabId !== undefined) windowId = (await ensureAllowed(requireTabId(params.tabId), check)).windowId;
+    else {
+      try { windowId = (await browserStep(check, 'windows.getLastFocused', () => chrome.windows.getLastFocused({ windowTypes: ['normal'] }))).id; }
+      catch (error) { check(); throw Object.assign(new Error('没有可用的普通浏览器窗口，请先手动打开窗口；插件不会激活或新建窗口'), { code: 'NO_BROWSER_WINDOW' }); }
+    }
+    if (!Number.isInteger(windowId) || windowId < 0) throw Object.assign(new Error('没有可用的普通浏览器窗口'), { code: 'NO_BROWSER_WINDOW' });
+    const beforeWindow = await browserStep(check, 'windows.get', () => chrome.windows.get(windowId));
+    check();
+    const tab = await browserStep(check, 'tabs.create', () => chrome.tabs.create({ windowId, url: params.url, active: false,
+      ...(params.tabId === undefined ? {} : { openerTabId: params.tabId }) }));
+    const afterWindow = await browserStep(check, 'windows.get', () => chrome.windows.get(windowId));
+    return { opened: true, tabId: tab.id, windowId: tab.windowId, active: tab.active === true,
+      windowFocusedBefore: beforeWindow.focused === true, windowFocusedAfter: afterWindow.focused === true,
+      requestedActive: false, authorized: !revoked.has(tab.id) && (autoAuthorize || authorized.has(tab.id)),
+      verificationRequired: '请按返回的新tabId读取；未授权时需用户授权，不能自动激活页面。' };
+  }
   if (!['snapshot', 'scroll', 'click', 'hover', 'focus', 'drag', 'select', 'set_checked', 'inspect', 'wait', 'fill', 'press', 'navigate', 'screenshot', 'release'].includes(method)) {
     throw new Error('不支持的方法');
   }
@@ -451,7 +471,8 @@ async function execute(command, check = () => {}) {
         else await agent('domHover', { ref: params.ref, point });
         await new Promise(done => setTimeout(done, params.durationMs ?? 300));
         check();
-        return dispatched({ cssHover: cdpEnabled, note: cdpEnabled ? '浏览器指针已移动，系统鼠标不动。' : '合成悬停事件不能设置CSS :hover，也不保证网站接受非可信事件。' });
+        const held = await agent('holdHover', { ref: params.ref });
+        return dispatched({ cssHover: cdpEnabled, cursorHeld: held.held === true, note: cdpEnabled ? '浏览器指针已移动，系统鼠标不动。' : '合成悬停事件不能设置CSS :hover，也不保证网站接受非可信事件。' });
       }
       case 'drag': {
         let from = await prepareTarget(params.fromRef, params.expectedFromContext);

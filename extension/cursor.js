@@ -1,6 +1,9 @@
 (() => {
   'use strict';
-  if (globalThis.__aiBrowserCursor) return;
+  if (globalThis.__aiBrowserCursor2) return;
+  // 旧业务页热更新：停掉旧层，避免两代视觉光标重叠。
+  globalThis.__aiBrowserCursor?.hide();
+  document.getElementById('ai-browser-cursor')?.remove();
 
   // 原创光标和动效。仅移动期间运行一条帧循环，静止后停止。
   let host, shadow, pointer, halo, ring, trailLayer;
@@ -9,6 +12,7 @@
   let hideTimer = null;
   let hideMs = 10000;
   let trailMs = 5000;
+  let held = false;
   let pulse = null;
   const trails = new Set();
   const MAX_TRAILS = 64;
@@ -98,7 +102,7 @@
 
   function scheduleHide() {
     clearTimeout(hideTimer);
-    hideTimer = setTimeout(hidePointer, hideMs);
+    if (!held || hideMs === 0) hideTimer = setTimeout(hidePointer, hideMs);
   }
 
   function hidePointer() {
@@ -110,6 +114,7 @@
   }
 
   function hide() {
+    held = false;
     hidePointer();
     for (const trail of [...trails]) removeTrail(trail);
   }
@@ -124,7 +129,13 @@
     if (!Number.isFinite(to.x) || !Number.isFinite(to.y)) throw new Error('光标坐标无效');
     const surface = shadow.getElementById('surface');
     surface.style.opacity = '1';
-    const from = position ?? { x: Math.max(4, to.x - 36), y: Math.min(innerHeight - 4, to.y + 28) };
+    const from = point.from && Number.isFinite(point.from.x) && Number.isFinite(point.from.y)
+      ? { x: point.from.x, y: point.from.y } : position;
+    // 第一次没有已知位置时直接出现在目标，不伪造“从旁边划入”的起点。
+    if (!from) {
+      draw(to); scheduleHide();
+      return { shown: true, animated: false };
+    }
     const distance = Math.hypot(to.x - from.x, to.y - from.y);
     if (point.animate === false || document.visibilityState !== 'visible' || reducedMotion() || distance < 2) {
       draw(to);
@@ -132,7 +143,7 @@
       return { shown: true, animated: false };
     }
     const duration = Math.min(320, Math.max(160, 130 + distance * .18));
-    const bend = Math.min(44, distance * .08);
+    const bend = point.linear ? 0 : Math.min(44, distance * .08);
     const control = { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 - bend };
     const tilt = Math.max(-24, Math.min(24, (to.x - from.x) * .06));
     draw(from);
@@ -190,6 +201,16 @@
     return { pulsed: true };
   }
 
+  function hold(value) {
+    const next = value === true;
+    if (next === held) return;
+    held = next;
+    if (held) {
+      clearTimeout(hideTimer);
+      if (shadow && hideMs > 0) shadow.getElementById('surface').style.opacity = '1';
+    } else scheduleHide();
+  }
+
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible' && move) {
       const to = move.to;
@@ -198,5 +219,7 @@
       pointer.style.willChange = 'auto';
     }
   });
-  Object.defineProperty(globalThis, '__aiBrowserCursor', { value: Object.freeze({ show, click, hide }) });
+  Object.defineProperty(globalThis, '__aiBrowserCursor2', { value: Object.freeze({ show, click, hide, hold,
+    state: () => ({ position: position && { ...position }, held, moving: Boolean(move),
+      visible: Boolean(shadow && shadow.getElementById('surface').style.opacity === '1') }) }) });
 })();
