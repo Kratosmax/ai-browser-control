@@ -2,7 +2,7 @@
 
 让支持 MCP 的 AI 助手按标签页读取和操作真实 Edge / Chrome。后台操作不切换标签页、不移动系统鼠标。
 
-当前源码版本：0.9.0。此版本包含光标与轨迹改造、输入/截图独立开关、懒加载探测和跨站点动态列表技能。通过仓库更新获取；未创建对应 GitHub Release。
+当前源码版本：0.10.1。包含0.10.0的菜单与特殊交互、状态检查及有条件等待，并修复展开菜单中非标准选项没有ref的问题；保留0.9.1的连接恢复和有界日志。通过仓库更新获取，未创建对应 GitHub Release。
 
 ## 开始使用
 
@@ -18,13 +18,13 @@
 
 > 使用 ai-browser 的 browser_status 检查连接，再用 browser_list_tabs 列出标签页。只读，不点击、不填写、不导航。
 
-扩展弹窗只有一个连接/断开按钮；“CDP 点击与输入”和“允许截图使用 CDP”独立可见。端口、光标与轨迹停留时间位于“更多设置”。用户主动断开后，扩展后台重启也不会自动连接。
+扩展弹窗只有一个连接/断开按钮；“CDP 真实交互”和“允许截图使用 CDP”独立可见。端口、光标与轨迹停留时间位于“更多设置”。用户主动断开后，扩展后台重启也不会自动连接。
 
 ## 输入与截图独立设置
 
 | 设置 | 默认 | 开启时 | 关闭时 |
 | --- | --- | --- | --- |
-| CDP 点击与输入 | 关闭 | 浏览器真实输入协议 | DOM 点击、原生 value setter、input/change 及有限按键行为 |
+| CDP 真实交互 | 关闭 | 浏览器真实输入协议 | DOM 点击、原生 value setter、input/change 及有限按键行为 |
 | 允许截图使用 CDP | 开启 | 按 tabId 截当前或后台页；完成后解除仅为截图新建的调试附加 | captureVisibleTab，仅当前选中页，需用户点击扩展图标取得 activeTab 临时权限 |
 
 读取始终走隔离脚本，导航走 tabs.update，两者不需要 CDP。默认 DOM 输入与独立 CDP 截图可以同时使用。已有用户显式保存的输入选择保留；新增截图选项默认允许，用户可单独关闭。
@@ -57,6 +57,10 @@
 | browser_snapshot | 默认滚动探测懒加载；返回当前正文、ref 与累计观察。load=current 仅回读 |
 | browser_scroll | 主文档或指定容器向上/下、顶部/底部滚动；不点击、不切页 |
 | browser_click | 按 ref 点击 |
+| browser_hover / browser_focus | 悬停或取得页面内焦点 |
+| browser_drag | 按源与目标ref拖拽 |
+| browser_select / browser_set_checked | 原生select选择、幂等勾选状态 |
+| browser_inspect / browser_wait | 读取元素状态、有条件等待 |
 | browser_fill | 替换文本框或 contenteditable 内容 |
 | browser_press | 在目标标签页发送支持的按键 |
 | browser_navigate | 导航到明确的 HTTP(S) 地址 |
@@ -64,6 +68,10 @@
 | browser_release | 释放此页，自动授权模式下也生效 |
 
 每次快照刷新 ref。动作后重新读取快照确认；超时不等于失败，不直接重复提交、支付或发送。快照不读取 Cookie、localStorage 或浏览历史，也不输出密码框的值。
+
+0.10.0提供17个工具。click支持button=right、clickCount=2、holdMs和position相对位置；press支持ref聚焦和Shift+Tab、Alt+ArrowDown/Up、Shift+F10、Control+Enter。快照增加disabled/focused/checked/selected/hasPopup/controls/busy，inspect可读遮挡、位置和原生select选项；wait最长5秒。DOM悬停不支持纯CSS :hover，CDP真实交互沿用原开关并保留保存值。完整流程与边界见[特殊交互与状态](skills/ai-browser-control/references/interactions.md)。
+
+0.10.1把tabindex控件，以及由aria-haspopup+controls/owns关联或具备menu/listbox角色的可见弹层内列表项、自绘指针项纳入定位。快照标记inPopup并优先保留这些选项；没有标准role的选项仍按真实角色返回，不虚构menuitem。inspect触发器可见关联popups状态和候选项数。此为DOM候选识别，不等于所有列表项都必然绑定了点击处理器。
 
 当前范围：主文档普通 DOM、同源 iframe 正文；跨域 iframe、封闭 Shadow DOM、canvas 内部控件和系统文件选择框不支持。动态页面内容尚未出现时稍后重新读取，不把短文档当成错误。
 
@@ -79,7 +87,7 @@
 
 ### 后台截图与 CDP
 
-允许截图使用 CDP 时，按 tabId 发给 Page.captureScreenshot，支持目标页未选中，不调用激活标签页或聚焦窗口；已在独立真实 Edge 中验证截图前后选中标签不变。关闭“CDP 点击与输入”不影响这项能力。只有关闭截图 CDP 才改用 captureVisibleTab，该 API 仅支持窗口当前选中的标签页。[Chrome 官方 API](https://developer.chrome.com/docs/extensions/reference/api/tabs#method-captureVisibleTab)
+允许截图使用 CDP 时，按 tabId 发给 Page.captureScreenshot，支持目标页未选中，不调用激活标签页或聚焦窗口；已在独立真实 Edge 中验证截图前后选中标签不变。关闭“CDP 真实交互”不影响这项能力。只有关闭截图 CDP 才改用 captureVisibleTab，该 API 仅支持窗口当前选中的标签页。[Chrome 官方 API](https://developer.chrome.com/docs/extensions/reference/api/tabs#method-captureVisibleTab)
 
 截图由浏览器生成，不需要网站提供截图接口；这不构成反爬保证。本轮已在用户打开的携程后台页成功截图，回读仍有航班与订票按钮，未见可见验证提示。紧邻复测前台标签不变；首轮较晚回查出现过一次选中变化，原因未查实，详见 TEST-RESULTS.md。这些结果不证明站点长期不会识别、限流或触发验证。
 
@@ -107,6 +115,22 @@ node install.mjs bridge token <端口>
 只用于可信网络，不将桥转发到公网。当前传输为 HTTP，token 不提供传输加密。token 文件位于 `~/.zcode/ai-browser-control/<端口>/token`；不要提交到仓库或写入公共日志。删除 token 并重启桥可轮换凭据。
 
 网页 Origin 被拒绝；扩展首次连接登记自身来源。这条边界不隔离本机进程。
+
+## 连接异常排查
+
+弹窗“已连接”需同时核对配对状态、近期轮询和桥返回的本扩展心跳；仅配对成功不表示命令通道可用。状态读取失败会显示连接异常，不能继续沿用绿色旧状态。连接按钮发起请求后先显示确认通道，真正可用由状态回读决定。
+
+浏览器命令最多等待11秒，超时报告“结果不确定”并恢复轮询，不自动重放原动作。Chrome已接收的操作无法保证取消；原操作仍未结束时，同一标签页的新操作会被拒绝，其他标签页可继续使用。先回读结果，不重复提交、支付或删除。仍无法恢复该页时，可重新加载扩展后再读取状态，不把超时当作操作未发生。
+
+网络异常会自动重试，用户主动“断开”则保持断开。手动重连会使旧请求失效，迟到的响应不能覆盖新连接；桥端断开同时清除当前扩展的心跳。`browser_status` 的心跳陈旧只证明通道未响应，不能单凭它判断是其他agent抢占或浏览器后台挂起。
+
+诊断日志位于 `%USERPROFILE%\.zcode\ai-browser-control\<端口>\bridge.log`，新记录为逐行 JSON；升级保留的旧日志尾部仍为旧格式。当前文件和 `.1`、`.2` 两份历史每份最多1 MiB，单桥合计最多3 MiB；超限自动轮转，启动时也会裁剪旧版超大日志。轮转失败会跳过写入，不回退到无限追加。桥的后台启动入口不再把 stdout 长期重定向到日志，以免绕过大小限制。
+
+日志记录配对/断开、轮询、重试间隔、命令排队/派发/结果/超时，以及扩展的授权查询、脚本注入、prepare、DOM/CDP执行等阶段和耗时。用桥记录的 `id` 与 `extension_event.diagnostic.commandId` 关联；扩展事件另带 `session`、`seq`、`epoch` 和版本，以区分后台重启、重连和补传。桥接收时间在外层 `time`，扩展原事件时间为内层毫秒时间戳。不记录页面URL、标题、正文、截图、输入值、token或原始错误正文；只保留固定错误类别和HTTP状态码。
+
+扩展在 `chrome.storage.local.diagnosticLog` 中保留最近最多128条且少于64 KiB的元数据，200毫秒合并存储，最多一个存储请求在途；桥恢复后自动分批补传。补传不阻塞命令通道。worker重启可能重传已有事件，按session+seq识别重复；旧记录会被新记录覆盖，日志不是无限期审计。完全冻结worker或浏览器存储故障时无法保证持久化。
+
+`browser_status` 返回桥的实际 `version` 和最近收到的 `extensionVersion`；未收到新版诊断时扩展版本为null，不能把磁盘清单版本当作已加载版本。扩展弹窗页脚显示浏览器实际加载的版本。版本源为 `.zcode-plugin/plugin.json`，扩展清单与可选市场条目必须同步，Node回归检查清单一致性。
 
 ## 更新
 
@@ -140,7 +164,7 @@ node test-page/serve.mjs
 自动化回归：
 
 ```powershell
-node --test tests/bridge.test.mjs tests/install.test.mjs extension/tests/mock.test.cjs extension/tests/expired-result.test.cjs
+node --test tests/bridge.test.mjs tests/install.test.mjs tests/diagnostics.test.mjs tests/protocol.test.mjs extension/tests/mock.test.cjs extension/tests/expired-result.test.cjs
 python -X utf8 tests/browser-ui.py
 python -X utf8 tests/browser-extension.py
 python -X utf8 tests/browser-loading.py
@@ -158,12 +182,12 @@ Python 项仅供开发验收，依赖测试机已有 Python Playwright、Pillow 
 
 主要入口：
 
-- `server/mcp.mjs`：MCP stdio 与 10 个工具；`server/bridge.mjs`：指令队列、来源校验、远程 token。
+- `server/mcp.mjs`：MCP stdio；`server/protocol.mjs`：17个工具与共用参数校验；`server/bridge.mjs`：指令队列、来源校验、远程 token。
 - `extension/background.js`：授权、CDP/DOM 路由、结果重传。
 - `extension/page-agent.js`：DOM 快照、ref、定位与 DOM 操作；`extension/cursor.js`：光标与动效。
 - `extension/popup.*`：弹窗；`install.mjs`：桥管理、更新及旧注册兼容。
 
-版本源为 `.zcode-plugin/plugin.json`，MCP/桥从该文件读取版本；扩展清单同步版本并由测试核对。修改 UI 必须检查真实渲染；本地预览不能当成用户实际安装入口已经更新。提交、推送、标签和 Release 按用户授权执行。不要提交 token、个人配置、浏览器 profile 或测试截图里的业务数据。
+版本源为 `.zcode-plugin/plugin.json`，MCP/桥从该文件读取版本；扩展清单同步版本并由测试核对。交付运行行为变更时必须递增版本：兼容修复用patch，新增完整能力用minor；未推送的本地候选也要有新版本，不能沿用旧版本掩盖运行差异。一起核对源码清单、可选市场条目、预览包、桥实际版本和扩展加载版本，未启用的部分明确标记。修改 UI 必须检查真实渲染；本地预览不能当成用户实际安装入口已经更新。提交、推送、标签和 Release 按用户授权执行。不要提交 token、个人配置、浏览器 profile 或测试截图里的业务数据。
 
 ## 停用与回滚
 

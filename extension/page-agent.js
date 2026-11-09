@@ -2,11 +2,11 @@
   'use strict';
 
   // 注入到隔离世界；重复注入保留当前引用，不接收网页脚本指令。
-  if (globalThis.__aiBrowserPageAgent4) return;
+  if (globalThis.__aiBrowserPageAgent6) return;
 
   let generation = Date.now();
   let refs = new Map();
-  const SELECTOR = 'input,textarea,select,button,a,[role],[contenteditable]';
+  const SELECTOR = 'input,textarea,select,button,a,[role],[tabindex],[contenteditable],[aria-haspopup],[draggable="true"],[ondrop]';
   const TEXT_INPUTS = new Set(['text', 'search', 'email', 'url', 'tel', 'password', 'number']);
 
   function visible(element) {
@@ -17,6 +17,37 @@
           style.visibility === 'collapse' || Number(style.opacity) === 0) return false;
     }
     return Array.from(element.getClientRects()).some((rect) => rect.width > 0 && rect.height > 0);
+  }
+
+  function popupRoots() {
+    const roots = new Set(document.querySelectorAll('[role="menu"],[role="listbox"]'));
+    for (const trigger of document.querySelectorAll('[aria-controls],[aria-owns]')) {
+      for (const id of `${trigger.getAttribute('aria-controls') || ''} ${trigger.getAttribute('aria-owns') || ''}`.split(/\s+/).filter(Boolean)) {
+        const root = document.getElementById(id);
+        const popup = trigger.getAttribute('aria-haspopup');
+        if (root && ((popup && popup !== 'false') || ['menu', 'listbox'].includes(root.getAttribute('role')))) roots.add(root);
+      }
+    }
+    return [...roots].filter(visible);
+  }
+
+  function popupItems(roots) {
+    const items = new Set();
+    for (const root of roots) {
+      for (const element of root.querySelectorAll('li,[role="menuitem"],[role="menuitemcheckbox"],[role="menuitemradio"],[role="option"],[tabindex],button,a')) {
+        if (visible(element)) items.add(element);
+      }
+      // 非语义div菜单仅在已明确关联的弹层范围内识别指针样式，避免把整页正文当作按钮。
+      for (const element of root.querySelectorAll('div,span')) {
+        if (visible(element) && compact(element.innerText) && getComputedStyle(element).cursor === 'pointer' &&
+            ![...element.querySelectorAll('li,[role],button,a,[tabindex]')].some(visible)) items.add(element);
+      }
+    }
+    return items;
+  }
+
+  function interactiveCandidates() {
+    return [...new Set([...document.querySelectorAll(SELECTOR), ...popupItems(popupRoots())])];
   }
 
   function compact(value, limit = 500) {
@@ -75,22 +106,22 @@
   const identity = descriptor => JSON.stringify([descriptor.name, descriptor.role, descriptor.tag, descriptor.context, descriptor.href]);
 
   function resolve(ref) {
-    if (typeof ref !== 'string' || !refs.has(ref)) throw new Error('ref 无效或已过期，请重新 snapshot');
+    if (typeof ref !== 'string' || !refs.has(ref)) throw Object.assign(new Error('ref 无效或已过期，请重新 snapshot'), { code: 'STALE_REF' });
     const record = refs.get(ref);
     const element = record.element;
-    if (!visible(element)) throw new Error('目标已移除或不可见，请重新 snapshot');
-    if (identity(describe(element)) !== record.identity) throw new Error('目标身份已变化（列表可能重排或复用节点），已阻止操作，请重新 snapshot');
+    if (!visible(element)) throw Object.assign(new Error('目标已移除或不可见，请重新 snapshot'), { code: 'ELEMENT_NOT_VISIBLE' });
+    if (identity(describe(element)) !== record.identity) throw Object.assign(new Error('目标身份已变化（列表可能重排或复用节点），已阻止操作，请重新 snapshot'), { code: 'TARGET_CHANGED' });
     if (element.matches(':disabled') || element.closest('[inert], [aria-disabled="true"]')) {
-      throw new Error('目标不可交互');
+      throw Object.assign(new Error('目标不可交互'), { code: 'ELEMENT_DISABLED' });
     }
     return element;
   }
 
   async function prepare(target) {
-    const { ref, expectedContext, action } = typeof target === 'string' ? { ref: target } : target;
+    const { ref, expectedContext, action, position } = typeof target === 'string' ? { ref: target } : target;
     const element = resolve(ref);
-    if (action === 'click' && refs.get(ref).ambiguous && !expectedContext) throw new Error('同名按钮存在多个，请传 expectedContext 核对航班号等业务身份，不能只按序号点击');
-    if (expectedContext && !describe(element).context.includes(expectedContext)) throw new Error('目标上下文与 expectedContext 不符，已阻止操作，请重新 snapshot');
+    if (action && refs.get(ref).ambiguous && !expectedContext) throw Object.assign(new Error('同名按钮存在多个，请传 expectedContext 核对业务身份，不能只按序号操作'), { code: 'AMBIGUOUS_TARGET' });
+    if (expectedContext && !describe(element).context.includes(expectedContext)) throw Object.assign(new Error('目标上下文与 expectedContext 不符，已阻止操作，请重新 snapshot'), { code: 'TARGET_CHANGED' });
     const before = element.getClientRects()[0];
     // 已在视口内的目标不滚动，避免每次动作把目标挪到同一屏幕坐标。
     const outside = before && (before.top < 0 || before.left < 0 || before.bottom > innerHeight || before.right > innerWidth);
@@ -123,15 +154,15 @@
     const rects = Array.from(element.getClientRects());
     const rect = rects.find((item) => item.width > 0 && item.height > 0 &&
       item.bottom > 0 && item.right > 0 && item.top < innerHeight && item.left < innerWidth);
-    if (!rect) throw new Error('目标不在可操作的视口内');
+    if (!rect) throw Object.assign(new Error('目标不在可操作的视口内'), { code: 'TARGET_OUTSIDE_VIEWPORT' });
     const left = Math.max(0, rect.left);
     const right = Math.min(innerWidth, rect.right);
     const top = Math.max(0, rect.top);
     const bottom = Math.min(innerHeight, rect.bottom);
-    const x = (left + right) / 2;
-    const y = (top + bottom) / 2;
+    const x = Math.min(right - .5, Math.max(left + .5, rect.left + rect.width * (position?.x ?? .5)));
+    const y = Math.min(bottom - .5, Math.max(top + .5, rect.top + rect.height * (position?.y ?? .5)));
     const hit = document.elementFromPoint(x, y);
-    if (!hit || (hit !== element && !element.contains(hit))) throw new Error('目标中心被其他元素遮挡');
+    if (!hit || (hit !== element && !element.contains(hit))) throw Object.assign(new Error('目标中心被其他元素遮挡'), { code: 'ELEMENT_OBSCURED' });
     return { x, y, target: describe(element) };
   }
 
@@ -270,7 +301,8 @@
     let text = collectText();
     // 返回当前真实内容；短文档不等于尚未加载，不无条件追加 1.2 秒延迟。
 
-    const candidates = Array.from(document.querySelectorAll(SELECTOR));
+    const popupCandidates = popupItems(popupRoots());
+    const candidates = interactiveCandidates();
     const buttonCounts = new Map();
     for (const element of candidates) {
       if (roleOf(element) !== 'button') continue;
@@ -282,7 +314,7 @@
     const inViewport = new Set(candidates.filter(element => Array.from(element.getClientRects()).some(rect =>
       rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 &&
       rect.top < innerHeight && rect.left < innerWidth)));
-    candidates.sort((a, b) => Number(inViewport.has(b)) - Number(inViewport.has(a)));
+    candidates.sort((a, b) => Number(popupCandidates.has(b)) - Number(popupCandidates.has(a)) || Number(inViewport.has(b)) - Number(inViewport.has(a)));
     let scannedCandidates = 0;
     for (const element of candidates) {
       if (elements.length >= 150) break;
@@ -296,7 +328,9 @@
         ref,
         ...descriptor,
         requiresExpectedContext: ambiguous,
-        inViewport: inViewport.has(element)
+        inViewport: inViewport.has(element),
+        inPopup: popupCandidates.has(element),
+        ...elementState(element)
       };
       // 密码框保留定位信息，不把内容放入快照。
       if (element instanceof HTMLInputElement && element.type !== 'password') item.value = element.value.slice(0, 2000);
@@ -316,7 +350,7 @@
       loading,
       coverage: {
         scope: 'loaded-dom',
-        selectionPriority: 'viewport-first',
+        selectionPriority: popupCandidates.size ? 'popup-then-viewport' : 'viewport-first',
         dataCompleteness: 'unknown',
         documentReadyState: document.readyState || 'unknown',
         textTruncated: text.length > 12000,
@@ -326,6 +360,177 @@
         limits: { textCharacters: 12000, elements: 150 }
       }
     };
+  }
+
+  function elementState(element) {
+    return {
+      disabled: Boolean(element.matches(':disabled') || element.closest('[inert],[aria-disabled="true"]')),
+      focused: document.activeElement === element,
+      checked: element instanceof HTMLInputElement && ['checkbox', 'radio'].includes(element.type) ? element.checked : element.getAttribute('aria-checked'),
+      selected: element.getAttribute('aria-selected'),
+      hasPopup: element.getAttribute('aria-haspopup'), controls: element.getAttribute('aria-controls'),
+      busy: element.getAttribute('aria-busy') === 'true',
+      editable: Boolean(element.isContentEditable || element.matches('input:not([readonly]),textarea:not([readonly])'))
+    };
+  }
+
+  function inspect(ref) {
+    const record = refs.get(ref);
+    if (!record) throw new Error('ref无效或已过期，请重新snapshot');
+    const element = record.element;
+    if (!element.isConnected) return { removed: true, visible: false };
+    const descriptor = describe(element), rect = element.getClientRects()[0];
+    const hit = rect && document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    const state = { ...descriptor, ...elementState(element), visible: visible(element),
+      identityChanged: identity(descriptor) !== record.identity,
+      obscured: Boolean(hit && hit !== element && !element.contains(hit)),
+      inViewport: Boolean(rect && rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth) };
+    if (element instanceof HTMLInputElement) state.inputType = element.type;
+    if (element.hasAttribute('aria-controls') || element.hasAttribute('aria-owns')) {
+      const roots = `${element.getAttribute('aria-controls') || ''} ${element.getAttribute('aria-owns') || ''}`.split(/\s+/).filter(Boolean)
+        .map(id => document.getElementById(id)).filter(Boolean);
+      state.popups = roots.map(root => ({ id: root.id, visible: visible(root), itemCount: popupItems([root]).size }));
+    }
+    if (rect) state.rect = { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
+    if (element instanceof HTMLSelectElement) {
+      state.options = [...element.options].slice(0, 100).map(o => ({ value: o.value, label: o.label, disabled: o.disabled, selected: o.selected }));
+      state.optionsTruncated = element.options.length > 100;
+      state.selectedValues = [...element.selectedOptions].map(o => o.value);
+      state.multiple = element.multiple;
+    }
+    return state;
+  }
+
+  let hovered = null;
+  function mouse(element, type, point, extra = {}) {
+    const init = { clientX: point.x, clientY: point.y, bubbles: !/enter|leave/.test(type),
+      cancelable: true, composed: true, view: window, ...extra };
+    const event = type.startsWith('pointer') ? new PointerEvent(type, { pointerId: 1, pointerType: 'mouse', isPrimary: true, ...init }) : new MouseEvent(type, init);
+    return element.dispatchEvent(event);
+  }
+
+  function hoverAt(element, point) {
+    const previous = hovered?.isConnected ? hovered : null;
+    if (previous !== element) {
+      const path = node => { const chain = []; for (; node instanceof Element; node = node.parentElement) chain.push(node); return chain; };
+      const oldPath = path(previous), newPath = path(element);
+      if (previous) {
+        mouse(previous, 'pointerout', point, { relatedTarget: element });
+        mouse(previous, 'mouseout', point, { relatedTarget: element });
+        for (const node of oldPath.filter(n => !newPath.includes(n))) {
+          mouse(node, 'pointerleave', point, { relatedTarget: element }); mouse(node, 'mouseleave', point, { relatedTarget: element });
+        }
+      }
+      mouse(element, 'pointerover', point, { relatedTarget: previous }); mouse(element, 'mouseover', point, { relatedTarget: previous });
+      for (const node of newPath.filter(n => !oldPath.includes(n)).reverse()) {
+        mouse(node, 'pointerenter', point, { relatedTarget: previous }); mouse(node, 'mouseenter', point, { relatedTarget: previous });
+      }
+      hovered = element;
+    }
+    mouse(element, 'pointermove', point); mouse(element, 'mousemove', point);
+  }
+
+  function pointerTarget(ref, point) {
+    const element = resolve(ref), hit = document.elementFromPoint(point.x, point.y);
+    if (!hit || (hit !== element && !element.contains(hit))) throw new Error('目标被遮挡或已移动，请重新snapshot');
+    return hit;
+  }
+
+  function domHover({ ref, point }) {
+    hoverAt(pointerTarget(ref, point), point);
+    return { actionDispatched: true, mode: 'dom', trusted: false, cssHover: false };
+  }
+
+  async function pointerClick({ ref, point, button = 'left', clickCount = 1, holdMs = 0 }) {
+    const element = pointerTarget(ref, point), right = button === 'right';
+    const data = { button: right ? 2 : 0, buttons: right ? 2 : 1 };
+    // 普通click保留既有行为；特殊动作才明确派发完整事件序列。
+    for (let count = 1; count <= clickCount; count++) {
+      pointerTarget(ref, point);
+      mouse(element, 'pointerdown', point, data); mouse(element, 'mousedown', point, { ...data, detail: count });
+      try { if (holdMs) await new Promise(done => setTimeout(done, holdMs)); }
+      finally {
+        mouse(element, 'pointerup', point, { ...data, buttons: 0 }); mouse(element, 'mouseup', point, { ...data, buttons: 0, detail: count });
+      }
+      if (!element.isConnected) break;
+      if (right) mouse(element, 'contextmenu', point, { button: 2, detail: count });
+      else if (!holdMs) mouse(element, 'click', point, { detail: count });
+    }
+    if (!right && clickCount === 2 && element.isConnected) mouse(element, 'dblclick', point, { detail: 2 });
+    return { clicked: !holdMs, actionDispatched: true, mode: 'dom', trusted: false };
+  }
+
+  async function domDrag({ fromRef, toRef, from, to, durationMs = 400 }) {
+    const source = pointerTarget(fromRef, from), target = pointerTarget(toRef, to);
+    const transfer = new DataTransfer();
+    const dragEvent = (element, type, point) => element.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: transfer, clientX: point.x, clientY: point.y }));
+    const html5 = source.closest('[draggable="true"]');
+    mouse(source, 'pointerdown', from, { buttons: 1 }); mouse(source, 'mousedown', from, { buttons: 1 });
+    let dropped = false;
+    try {
+      if (html5 && !dragEvent(html5, 'dragstart', from)) return { actionDispatched: true, canceled: true, mode: 'dom', trusted: false };
+      for (let i = 1; i <= 12; i++) {
+        await new Promise(done => setTimeout(done, durationMs / 12));
+        const point = { x: from.x + (to.x - from.x) * i / 12, y: from.y + (to.y - from.y) * i / 12 };
+        const hit = document.elementFromPoint(point.x, point.y) || source;
+        mouse(hit, 'pointermove', point, { buttons: 1 }); mouse(hit, 'mousemove', point, { buttons: 1 });
+        if (html5) dragEvent(html5, 'drag', point);
+      }
+      pointerTarget(toRef, to);
+      if (html5) {
+        dragEvent(target, 'dragenter', to);
+        if (!dragEvent(target, 'dragover', to)) { dragEvent(target, 'drop', to); dropped = true; }
+      }
+      return { actionDispatched: true, mode: 'dom', trusted: false, dropDispatched: dropped };
+    } finally {
+      mouse(target, 'pointerup', to, { buttons: 0 }); mouse(target, 'mouseup', to, { buttons: 0 });
+      if (html5) dragEvent(html5, 'dragend', to);
+    }
+  }
+
+  function select({ ref, values }) {
+    const element = resolve(ref);
+    if (!(element instanceof HTMLSelectElement)) throw new Error('仅支持原生select；自绘下拉请用hover/click/press');
+    if (!element.multiple && values.length !== 1) throw new Error('单选select只能选择一个值');
+    const options = [...element.options];
+    for (const value of values) {
+      const option = options.find(o => o.value === value);
+      if (!option || option.disabled || option.closest('optgroup[disabled]')) throw new Error('目标选项不存在或已禁用');
+    }
+    const before = [...element.selectedOptions].map(o => o.value);
+    if (JSON.stringify([...before].sort()) === JSON.stringify([...values].sort())) return { selectedValues: before, changed: false, verified: true };
+    for (const option of options) option.selected = values.includes(option.value);
+    element.dispatchEvent(new Event('input', { bubbles: true })); element.dispatchEvent(new Event('change', { bubbles: true }));
+    const actual = [...element.selectedOptions].map(o => o.value);
+    return { selectedValues: actual, changed: true, actionDispatched: true, verified: JSON.stringify([...actual].sort()) === JSON.stringify([...values].sort()), trusted: false, mode: 'dom' };
+  }
+
+  async function waitFor({ ref, text, name, role, state = 'visible', timeoutMs = 3000 }) {
+    const started = Date.now();
+    let count = 0;
+    while (true) {
+      let candidates;
+      if (ref) {
+        if (!refs.has(ref)) throw new Error('ref无效或已过期，请重新snapshot');
+        const record = refs.get(ref);
+        if (record.element.isConnected && identity(describe(record.element)) !== record.identity) throw new Error('等待目标身份已变化，请重新snapshot');
+        candidates = [record.element];
+      } else if (name || role) {
+        candidates = interactiveCandidates().filter(e => (!name || nameOf(e) === name) && (!role || roleOf(e) === role) && (!text || (e.innerText || '').includes(text)));
+      } else {
+        const found = (document.body?.innerText || '').includes(text);
+        if (!['visible', 'hidden'].includes(state)) throw new Error('文本等待只支持visible/hidden');
+        candidates = found ? [document.body] : [];
+      }
+      const shown = candidates.filter(visible);
+      count = shown.length;
+      const matched = state === 'hidden' ? shown.length === 0 : shown.some(e => state === 'visible' ||
+        (state === 'enabled' && !elementState(e).disabled) ||
+        (state === 'expanded' && e.getAttribute('aria-expanded') === 'true') ||
+        (state === 'collapsed' && e.getAttribute('aria-expanded') === 'false'));
+      if (matched || Date.now() - started >= timeoutMs) return { matched, state, count, elapsedMs: Date.now() - started, timedOut: !matched };
+      await new Promise(done => setTimeout(done, 100));
+    }
   }
 
   async function domClick(ref) {
@@ -357,12 +562,15 @@
       } else throw new Error('DOM 模式下全选需要先聚焦文本框');
       return { pressed: true, mode: 'dom', trusted: false };
     }
-    const actual = key === 'Space' ? ' ' : key;
-    const allowed = element.dispatchEvent(new KeyboardEvent('keydown', { key: actual, bubbles: true, cancelable: true }));
-    if (allowed && key === 'Tab') {
+    const pieces = key.split('+'), base = pieces.at(-1);
+    const modifiers = { altKey: pieces.includes('Alt'), ctrlKey: pieces.includes('Control'), shiftKey: pieces.includes('Shift') };
+    const actual = base === 'Space' ? ' ' : base;
+    const allowed = element.dispatchEvent(new KeyboardEvent('keydown', { key: actual, ...modifiers, bubbles: true, cancelable: true }));
+    if (allowed && ['Tab', 'Shift+Tab'].includes(key)) {
       const targets = [...document.querySelectorAll('a[href],button,input,textarea,select,[tabindex],[contenteditable]')]
         .filter(item => visible(item) && !item.matches(':disabled') && item.tabIndex >= 0);
-      targets[(targets.indexOf(element) + 1) % targets.length]?.focus();
+      const index = targets.indexOf(element), next = modifiers.shiftKey ? (index <= 0 ? targets.length - 1 : index - 1) : (index + 1) % targets.length;
+      targets[next]?.focus();
     } else if (allowed && key === 'Enter' && element instanceof HTMLInputElement && element.form) {
       element.form.requestSubmit();
     } else if (allowed && ['Enter', 'Space'].includes(key) && element.matches('button,a[href],input[type=checkbox],input[type=radio]')) {
@@ -375,7 +583,7 @@
         element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' }));
       }
     }
-    element.dispatchEvent(new KeyboardEvent('keyup', { key: actual, bubbles: true }));
+    element.dispatchEvent(new KeyboardEvent('keyup', { key: actual, ...modifiers, bubbles: true }));
     return { pressed: true, mode: 'dom', trusted: false, note: 'DOM 按键为非可信事件，网站可能忽略；不会自动启用 CDP。' };
   }
 
@@ -384,14 +592,14 @@
     try {
       return await fn(...a);
     } catch (error) {
-      return { __zcodeError: String((error && error.message) || error) };
+      return { __zcodeError: String((error && error.message) || error), __zcodeCode: error?.code || 'PAGE_ACTION_FAILED' };
     }
   };
 
   const agent = {
     snapshot: guarded('snapshot', snapshot),
     scroll: guarded('scroll', scroll),
-    inspect: guarded('inspect', ref => { const record = refs.get(ref); return record?.element.isConnected ? describe(record.element) : { removed: true }; }),
+    inspect: guarded('inspect', inspect),
     prepare: guarded('prepare', prepare),
     focus: guarded('focus', focus),
     focusTarget: guarded('focusTarget', focusTarget),
@@ -399,11 +607,16 @@
     cursorPulse: guarded('cursorPulse', point => globalThis.__aiBrowserCursor.click(point)),
     hideCursor: guarded('hideCursor', () => { globalThis.__aiBrowserCursor?.hide(); return { hidden: true }; }),
     domClick: guarded('domClick', domClick),
+    domHover: guarded('domHover', domHover),
+    pointerClick: guarded('pointerClick', pointerClick),
+    domDrag: guarded('domDrag', domDrag),
+    select: guarded('select', select),
+    waitFor: guarded('waitFor', waitFor),
     domFill: guarded('domFill', domFill),
     domPress: guarded('domPress', domPress)
   };
 
-  Object.defineProperty(globalThis, '__aiBrowserPageAgent4', {
+  Object.defineProperty(globalThis, '__aiBrowserPageAgent6', {
     value: Object.freeze(agent),
     configurable: false,
     writable: false

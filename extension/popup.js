@@ -35,7 +35,10 @@ function httpTab(tab) {
 }
 
 async function send(type, data = {}) {
-  const response = await chrome.runtime.sendMessage({ type, ...data });
+  let timer;
+  const response = await Promise.race([chrome.runtime.sendMessage({ type, ...data }), new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('扩展后台未响应，请重新加载扩展后重试')), 6000);
+  })]).finally(() => clearTimeout(timer));
   if (!response || response.error) throw new Error(response?.error?.message || '后台未响应');
   return response.result;
 }
@@ -102,6 +105,19 @@ function refresh() {
   return refreshPromise;
 }
 
+function showConnectionError(error) {
+  isConnected = false;
+  isConnecting = true;
+  statusText.textContent = '连接异常';
+  connectionDetail.textContent = error.message || '无法读取连接状态';
+  statusDot.className = 'dot wait';
+  toggleButton.textContent = '重新连接';
+  toggleButton.disabled = busy;
+  toggleButton.classList.remove('connected');
+  // 异常时点击应重新建立连接，而不是仅停止一个已失效的重连循环。
+  isConnecting = false;
+}
+
 async function act(action) {
   if (busy) return;
   busy = true;
@@ -120,6 +136,7 @@ async function act(action) {
     try {
       await refresh();
     } catch (error) {
+      showConnectionError(error);
       message.textContent = error.message || '无法读取状态';
       message.classList.add('error');
     }
@@ -136,7 +153,7 @@ toggleButton.addEventListener('click', () => {
     } else {
       toggleButton.textContent = '正在连接…';
       await send('connect');
-      message.textContent = '已连接。';
+      message.textContent = '已请求连接，正在确认命令通道。';
     }
   });
 });
@@ -218,12 +235,13 @@ releaseButton.addEventListener('click', () => {
 });
 
 void refresh().catch((error) => {
+  showConnectionError(error);
   message.hidden = false;
   message.textContent = error.message || '无法读取状态';
   message.classList.add('error');
 });
 // 只刷新状态，不改变用户选择的标签页。
 const refreshTimer = setInterval(() => {
-  if (!busy) void refresh().catch(() => {});
+  if (!busy) void refresh().catch(showConnectionError);
 }, 2000);
 window.addEventListener('pagehide', () => clearInterval(refreshTimer));

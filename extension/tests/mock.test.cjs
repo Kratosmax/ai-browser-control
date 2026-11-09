@@ -20,6 +20,7 @@ function backgroundHarness(stored = { cdpEnabled: true, screenshotCdpEnabled: tr
     { id: 8, url: 'chrome://settings', active: false }
   ];
   let fetchImpl = async () => { throw new Error('offline'); };
+  let diagnosticFetch = async () => ({ ok: true, status: 200, body: { cancel: async () => {} } });
   let timerId = 0;
   const chrome = {
     storage: { local: {
@@ -64,15 +65,120 @@ function backgroundHarness(stored = { cdpEnabled: true, screenshotCdpEnabled: tr
     chrome, URL, AbortController,
     setTimeout: (fn, ms) => { const id = ++timerId; timers.set(id, { fn, ms }); return id; },
     clearTimeout: (id) => timers.delete(id),
-    fetch: (...args) => fetchImpl(...args)
+    fetch: (...args) => {
+      if (args[0].endsWith('/diagnostics')) {
+        calls.push(['diagnostics', JSON.parse(args[1].body)]);
+        return diagnosticFetch(...args);
+      }
+      return fetchImpl(...args);
+    }
   });
   vm.runInContext(source('background.js'), context);
   return {
     calls, listeners, timers,
     run: (code) => vm.runInContext(code, context),
-    fetch: (fn) => { fetchImpl = fn; }
+    fetch: (fn) => { fetchImpl = fn; },
+    diagnosticFetch: (fn) => { diagnosticFetch = fn; }
   };
 }
+
+test('诊断环形记录有数量与字节上限，保留最新事件，存储后可跨worker恢复', async () => {
+  const h = backgroundHarness({ disconnected: true });
+  await tick();
+  h.run("for(let i=0;i<1000;i++) diagnostic('transport_error',{status:503,retryMs:i,error:'PRIVATE-ERROR',text:'PRIVATE-TEXT'})");
+  const records = JSON.parse(h.run('JSON.stringify(diagnosticLog)'));
+  assert.equal(records.length, 128);
+  assert(JSON.stringify(records).length < 65536);
+  assert.equal(records.at(-1).retryMs, 999);
+  assert(!JSON.stringify(records).includes('PRIVATE-'));
+  const save = [...h.timers.values()].find(t => t.ms === 200);
+  save.fn();
+  await tick();
+  const persisted = h.calls.filter(c => c[0] === 'store' && c[1].diagnosticLog).at(-1)[1].diagnosticLog;
+  const resumed = backgroundHarness({ disconnected: true, diagnosticLog: persisted });
+  await tick();
+  assert(resumed.run('diagnosticLog.some(e=>e.retryMs===999)'));
+  assert(resumed.run("diagnosticLog.at(-1).event==='worker_start'"));
+  h.run("for(let i=0;i<1000;i++) diagnostic('transport_error',{commandId:'c'.repeat(64),method:'m'.repeat(64),phase:'p'.repeat(64),outcome:'o'.repeat(64),durationMs:99999999999999,status:99999999999999,tabId:99999999999999,retryMs:99999999999999})");
+  assert(h.run('JSON.stringify(diagnosticLog).length') < 64 * 1024);
+  assert(h.run('diagnosticLog.length') < 128, '长元数据达到字节上限时应先于数量上限回收');
+});
+
+test('诊断存储永久悬挂时最多保留一个写请求，后续事件仍按环形上限回收', async () => {
+  const h = backgroundHarness({ disconnected: true });
+  await tick();
+  h.run('globalThis.qaStorageWrites=0;chrome.storage.local.set=()=>{qaStorageWrites++;return new Promise(()=>{})}');
+  [...h.timers.values()].find(t => t.ms === 200).fn();
+  await tick();
+  h.run("for(let i=0;i<1000;i++) diagnostic('transport_error',{retryMs:i})");
+  await tick();
+  assert.equal(h.run('qaStorageWrites'), 1);
+  assert.equal(h.run('diagnosticLog.length'), 128);
+  assert.equal(h.run('diagnosticTimer'), null);
+});
+
+test('诊断补传失败不阻塞命令，恢复后补传且不重复发送已确认批次', async () => {
+  const h = backgroundHarness({ disconnected: true });
+  await tick();
+  h.run('wantDisconnect=false;paired=true;diagnosticPending=[]');
+  h.diagnosticFetch(async () => { throw new Error('offline'); });
+  h.run("diagnostic('manual_connect');flushDiagnostics()");
+  await tick();
+  assert.equal(h.run('diagnosticPending.length'), 1);
+  h.diagnosticFetch(async () => ({ ok: true, status: 200, body: { cancel: async () => {} } }));
+  h.run('flushDiagnostics()');
+  await tick();
+  assert.equal(h.run('diagnosticPending.length'), 0);
+  h.run('flushDiagnostics()');
+  await tick();
+  assert.equal(h.calls.filter(c => c[0] === 'diagnostics').length, 2);
+});
+
+test('悬挂定位命令诊断保留ID、最后阶段与超时，不保存输入或错误正文', async () => {
+  const h = backgroundHarness({ disconnected: true, autoAuthorize: true });
+  await tick();
+  h.run("wantDisconnect=false;chrome.scripting.executeScript=async(spec)=>spec.files?[{}]:new Promise(()=>{})");
+  const work = h.run("executeBounded({id:'hang-1',method:'fill',params:{tabId:7,ref:'r1-1',text:'PRIVATE-FORM'}})");
+  const rejected = assert.rejects(work, /超时/);
+  await tick();
+  [...h.timers.values()].find(t => t.ms === 11000).fn();
+  await rejected;
+  const records = JSON.parse(h.run('JSON.stringify(diagnosticLog)'));
+  const end = records.find(e => e.event === 'command_end');
+  assert.equal(end.commandId, 'hang-1');
+  assert.equal(end.phase, 'prepare');
+  assert.equal(end.outcome, 'timeout');
+  assert(records.some(e => e.event === 'step_start' && e.phase === 'prepare'));
+  assert(!JSON.stringify(records).includes('PRIVATE-'));
+});
+
+test('DOM悬停与新增能力不偷偷启用CDP；按ref发送组合键先聚焦正确目标', async () => {
+  const h = backgroundHarness({ autoAuthorize: true, disconnected: true });
+  await tick();
+  const hovering = h.run("execute({method:'hover',params:{tabId:7,ref:'r1-1',durationMs:0}})");
+  await tick();
+  [...h.timers.values()].find(t => t.ms === 0).fn();
+  const result = await hovering;
+  assert.equal(result.cssHover, false);
+  assert(!h.calls.some(c => c[0] === 'attach'));
+  assert(h.calls.some(c => c[0] === 'script' && c[1].args?.[0] === 'domHover'));
+  await h.run("execute({method:'press',params:{tabId:7,ref:'r1-1',key:'Alt+ArrowDown'}})");
+  const operations = h.calls.filter(c => c[0] === 'script' && c[1].args).map(c => c[1].args[0]);
+  assert(operations.indexOf('focusTarget') < operations.indexOf('domPress'));
+  const tabs = await h.run("execute({method:'list_tabs'})");
+  assert.equal(tabs[0].capabilities.cssHover, false);
+  assert.equal(tabs[0].capabilities.nativeBrowserMenus, false);
+});
+
+test('CDP点击按下失败仍尝试释放，组合键失败仍释放修饰键', async () => {
+  const h = backgroundHarness({ autoAuthorize: true, cdpEnabled: true, disconnected: true });
+  await tick();
+  h.run("globalThis.qaInput=[];chrome.debugger.sendCommand=async(target,method,params)=>{qaInput.push(params);if(params.type==='mousePressed'||(params.type==='rawKeyDown'&&params.key==='ArrowDown'))throw new Error('fixture failure');return {}};");
+  await assert.rejects(h.run("execute({method:'click',params:{tabId:7,ref:'r1-1'}})"), /fixture/);
+  assert(h.run("qaInput.some(p=>p.type==='mouseReleased')"));
+  await assert.rejects(h.run("execute({method:'press',params:{tabId:7,key:'Alt+ArrowDown'}})"), /fixture/);
+  assert(h.run("qaInput.some(p=>p.type==='keyUp'&&p.key==='Alt'&&p.modifiers===0)"));
+});
 
 test('后台授权、全部方法、按键映射和撤销', async () => {
   const { calls, listeners, run } = backgroundHarness();
@@ -202,12 +308,120 @@ test('一键配对、单轮询、25秒超时及结果重传不重复动作', asy
   assert.equal(run("bridgeState"), '已断开');
 });
 
+test('命令悬挂到期后继续poll，迟到定位不再点击，同一id不自动重放', async () => {
+  const { run, fetch, timers, calls } = backgroundHarness({ disconnected: true });
+  await tick();
+  let polls = 0, posts = 0;
+  fetch(async (url, options) => {
+    if (url.endsWith('/pair') || url.endsWith('/unpair') || url.endsWith('/result')) {
+      if (url.endsWith('/result')) posts++;
+      return { ok: true, status: 200, body: { cancel: async () => {} } };
+    }
+    if (url.endsWith('/status')) return { ok: true, status: 200, json: async () => ({ connected: true, standby: false, client: 'chrome-extension://test' }) };
+    polls++;
+    if (polls <= 2) return { ok: true, status: 200, json: async () => ({ id: 'hung-click', method: 'click', params: { tabId: 7, ref: 'r1-1' } }) };
+    return new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(new Error('aborted'))));
+  });
+  await run("handlePopup({type:'authorize_tab',tabId:7})");
+  await run("let releasePrepare;const originalPageAgent=pageAgent;pageAgent=async(id,op,value)=>op==='prepare'?new Promise(done=>releasePrepare=done):originalPageAgent(id,op,value);");
+  await run("handlePopup({type:'connect'})");
+  await tick();
+  assert.equal(polls, 1);
+  for (const [id, timer] of [...timers]) if (timer.ms === 11000) { timers.delete(id); timer.fn(); }
+  await tick();
+  assert.equal(polls, 3, '超时回执及重复id回执后恢复poll');
+  assert.equal(posts, 2);
+  assert.match(run("completed.get('hung-click').error.message"), /结果不确定/);
+  await assert.rejects(run("executeBounded({id:'another',method:'click',params:{tabId:7,ref:'r1-1'}})"), /上一条操作仍未结束/);
+  await run('releasePrepare({x:20,y:30})');
+  await tick();
+  assert(!calls.some(c => c[0] === 'cdp' && c[2].type === 'mousePressed'), '迟到prepare不得继续点击');
+  assert.equal(run('runningTabs.size'), 0);
+});
+
+test('配对成功不能代替命令通道；桥心跳过期时状态拒绝假连接', async () => {
+  const { run, fetch } = backgroundHarness({ disconnected: true });
+  await tick();
+  fetch(async () => ({ ok: true, status: 200, json: async () => ({ connected: false, standby: false, client: 'chrome-extension://test' }) }));
+  run('wantDisconnect=false;paired=true;lastPollAt=Date.now();');
+  const state = await run("handlePopup({type:'popup_status'})");
+  assert.equal(state.connected, false);
+  assert.equal(state.connecting, true);
+  assert.match(state.bridgeState, /未响应/);
+  assert.equal(run('paired'), false);
+});
+
+test('DOM写入前脚本注入迟到时，操作到期不得继续派发domFill', async () => {
+  const { run, calls, timers } = backgroundHarness({ disconnected: true });
+  await tick();
+  await run("handlePopup({type:'authorize_tab',tabId:7})");
+  run("wantDisconnect=false;cdpEnabled=false;let resumeInjection;const actualScript=chrome.scripting.executeScript;let filesCount=0;chrome.scripting.executeScript=spec=>spec.files&&++filesCount===3?new Promise(done=>resumeInjection=()=>done([{result:undefined}])):actualScript(spec)");
+  const work = run("executeBounded({id:'late-fill',method:'fill',params:{tabId:7,ref:'r1-1',text:'do-not-write'}})");
+  const caught = assert.rejects(work, /等待超时/);
+  await tick();
+  for (const [id, timer] of [...timers]) if (timer.ms === 11000) { timers.delete(id); timer.fn(); }
+  await caught;
+  await run('resumeInjection()');
+  await tick();
+  assert(!calls.some(c => c[0] === 'script' && c[1].args?.[0] === 'domFill'));
+});
+
+test('断开后的旧pair迟到不会恢复连接，重连不受旧请求污染', async () => {
+  const { run, fetch } = backgroundHarness({ disconnected: true });
+  await tick();
+  let finishPair;
+  fetch(async url => url.endsWith('/pair') ? new Promise(done => { finishPair = done; }) : { ok: true, status: 200, body: { cancel: async () => {} } });
+  const connecting = run("handlePopup({type:'connect'})").catch(e => e);
+  await tick();
+  await run("handlePopup({type:'disconnect'})");
+  finishPair({ ok: true, status: 200, body: { cancel: async () => {} } });
+  await connecting;
+  await tick();
+  assert.equal(run('paired'), false);
+  assert.equal((await run("handlePopup({type:'popup_status'})")).connected, false);
+});
+
+test('网络忽略abort或正文不结束仍有硬期限，不会永久占住循环', async () => {
+  const { run, fetch, timers } = backgroundHarness({ disconnected: true });
+  await tick();
+  fetch(async () => ({ ok: true, status: 200, json: () => new Promise(() => {}) }));
+  const pending = run("bridgeFetch('/poll')");
+  const caught = assert.rejects(pending, /超时/);
+  for (const [id, timer] of [...timers]) if (timer.ms === 25000) { timers.delete(id); timer.fn(); }
+  await caught;
+  assert.equal(run('requestControllers.size'), 0);
+});
+
+test('结果重传收到403会重新配对，不会在未配对状态反复卡住result', async () => {
+  const { run, fetch, timers } = backgroundHarness({ disconnected: true });
+  await tick();
+  let pairs = 0, posts = 0, polls = 0;
+  fetch(async (url, options) => {
+    if (url.endsWith('/pair')) { pairs++; return { ok: true, status: 200, body: { cancel: async () => {} } }; }
+    if (url.endsWith('/result')) {
+      posts++;
+      return posts === 1 ? { ok: false, status: 403, json: async () => ({ error: '来源未配对' }) } : { ok: true, status: 200, body: { cancel: async () => {} } };
+    }
+    polls++;
+    if (polls === 1) return { ok: true, status: 200, json: async () => ({ id: 'result-repair', method: 'list_tabs' }) };
+    return new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(new Error('aborted'))));
+  });
+  await run("handlePopup({type:'connect'})");
+  await tick();
+  assert.equal(posts, 1);
+  for (const [id, timer] of [...timers]) if (timer.ms === 2000) { timers.delete(id); timer.fn(); }
+  await tick();
+  assert.equal(pairs, 2);
+  assert.equal(posts, 2);
+  assert.equal(polls, 2);
+});
+
 function pageHarness() {
   let nodes = [];
   let hit = null;
   const document = {
     title: 'Mock page', body: { innerText: '可见文本'.repeat(5000) }, activeElement: null,
-    querySelectorAll: selector => ['*', 'input,textarea,select,button,a,[role],[contenteditable]'].includes(selector) ? nodes : [],
+    querySelectorAll: selector => (selector === '*' || selector.startsWith('input,textarea,select,button,a,')) ? nodes : [],
     getElementById: () => null,
     elementFromPoint: () => hit
   };
@@ -247,7 +461,7 @@ function pageHarness() {
   return {
     document, Element, HTMLInputElement, HTMLTextAreaElement,
     setNodes: (items) => { nodes = items; }, inject,
-    get agent() { return context.__aiBrowserPageAgent4; }
+    get agent() { return context.__aiBrowserPageAgent6; }
   };
 }
 

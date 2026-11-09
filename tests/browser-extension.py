@@ -2,6 +2,7 @@
 仅使用临时浏览器配置及本地测试页面；不接触用户的桥、标签页或授权配置。
 """
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import io
 import json
 import shutil
@@ -14,7 +15,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from PIL import Image
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, expect
 
 sys.stdout.reconfigure(encoding='utf-8')
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,7 +29,12 @@ class Handler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(ROOT / 'test-page'), **kwargs)
 
     def do_GET(self):
-        if self.path.startswith('/lazy'):
+        if self.path.startswith('/interactions'):
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.end_headers()
+            self.wfile.write((ROOT / 'tests' / 'fixtures' / 'interactions.html').read_bytes())
+        elif self.path.startswith('/lazy'):
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.end_headers()
@@ -75,6 +81,9 @@ try:
             if result.get('isError'):
                 if allow_error:
                     return {'error': result['content'][0]['text']}
+                shutil.copy2(folder / 'bridge' / 'bridge.log', OUT / 'integration-failure-bridge.log')
+                if name == 'browser_drag':
+                    (OUT / 'integration-failure-extension.json').write_text(json.dumps(worker.evaluate('diagnosticLog'), ensure_ascii=False, indent=2), encoding='utf-8')
                 raise AssertionError(result)
             if result['content'][0]['type'] == 'image':
                 return result['content'][0]
@@ -203,6 +212,152 @@ try:
                 assert len(expanded) == 1 and 'F018' in expanded[0]['context']
                 assert [tab['id'] for tab in selected] == [tab['id'] for tab in worker.evaluate('chrome.tabs.query({active:true})')]
                 report['checks'].append({'name': 'MCP默认懒加载到18项；后台滚动、上下文错配拒绝、正确末项点击及同航班展开回读', 'passed': True})
+                tool('browser_navigate', {'tabId': tab_id, 'url': base + 'interactions'})
+                page.wait_for_url('**/interactions')
+
+                def pick(name):
+                    current = tool('browser_snapshot', {'tabId': tab_id, 'load': 'current'})
+                    matches = [e for e in current['elements'] if e['name'] == name]
+                    assert len(matches) == 1, (name, matches)
+                    return matches[0]['ref']
+
+                hover = tool('browser_hover', {'tabId': tab_id, 'ref': pick('悬停菜单')})
+                assert hover['outcome'] == 'unverified' and hover['cssHover'] is False
+                assert tool('browser_wait', {'tabId': tab_id, 'name': '悬停选项', 'role': 'menuitem', 'timeoutMs': 1000})['matched']
+                assert page.locator('#hovermenu').is_visible()
+                tool('browser_hover', {'tabId': tab_id, 'ref': pick('无语义菜单')})
+                assert tool('browser_wait', {'tabId': tab_id, 'name': '普通列表菜单项', 'timeoutMs': 1000})['matched']
+                page.evaluate("""()=>{let noise=document.createElement('div');noise.id='noise';noise.innerHTML=Array(180).fill('<button style="position:fixed;left:1098px;top:798px;width:1px;height:1px;padding:0;margin:0">干扰按钮</button>').join('');document.body.prepend(noise)}""")
+                plain_snap = tool('browser_snapshot', {'tabId': tab_id, 'load': 'current'})
+                assert plain_snap['coverage']['selectionPriority'] == 'popup-then-viewport'
+                plain_item = next(e for e in plain_snap['elements'] if e['name'] == '普通列表菜单项')
+                assert plain_item['inPopup'] and plain_item['tag'] == 'li'
+                assert any(e['name'] == '自绘菜单项' and e['inPopup'] for e in plain_snap['elements'])
+                tool('browser_click', {'tabId': tab_id, 'ref': plain_item['ref']})
+                assert page.locator('#result').inner_text() == '普通列表菜单项'
+                page.evaluate("document.getElementById('noise').remove()")
+                tool('browser_hover', {'tabId': tab_id, 'ref': pick('无语义菜单')})
+                controlled = tool('browser_inspect', {'tabId': tab_id, 'ref': pick('无语义菜单')})
+                assert controlled['popups'][0]['visible'] and controlled['popups'][0]['itemCount'] >= 3
+                page.evaluate("document.getElementById('plainmenu').hidden=true")
+                report['checks'].append({'name': '关联弹层无role的li/div菜单项可wait/snapshot/inspect/click，180个可见控件下优先保留菜单项', 'passed': True})
+                tool('browser_hover', {'tabId': tab_id, 'ref': pick('CSS菜单')})
+                assert page.locator('.cssmenu').is_hidden(), 'DOM不能伪装支持CSS hover'
+                assert tool('browser_wait', {'tabId': tab_id, 'text': '不存在的菜单', 'timeoutMs': 100})['timedOut']
+                tool('browser_click', {'tabId': tab_id, 'ref': pick('右键菜单'), 'button': 'right'})
+                assert page.locator('#result').inner_text() == '右键已展开'
+                tool('browser_click', {'tabId': tab_id, 'ref': pick('双击菜单'), 'clickCount': 2})
+                assert page.locator('#result').inner_text() == '双击已展开'
+                tool('browser_click', {'tabId': tab_id, 'ref': pick('长按菜单'), 'holdMs': 250})
+                assert page.locator('#result').inner_text() == '长按已展开'
+                assert page.evaluate('counts.holdClick') == 0
+                tool('browser_focus', {'tabId': tab_id, 'ref': pick('键盘菜单')})
+                assert page.locator('#key').evaluate('(e)=>e===document.activeElement')
+                tool('browser_press', {'tabId': tab_id, 'ref': pick('键盘菜单'), 'key': 'Alt+ArrowDown'})
+                assert page.locator('#keymenu').is_visible()
+                tool('browser_press', {'tabId': tab_id, 'ref': pick('焦点下一项'), 'key': 'Shift+Tab'})
+                assert page.locator('#key').evaluate('(e)=>e===document.activeElement')
+                tool('browser_click', {'tabId': tab_id, 'ref': pick('分裂创建'), 'position': {'x': .85, 'y': .5}})
+                assert page.locator('#splitmenu').is_visible() and page.evaluate('counts.main') == 0
+                options = tool('browser_inspect', {'tabId': tab_id, 'ref': pick('原生选择')})
+                assert any(o['value'] == 'b' for o in options['options'])
+                assert tool('browser_select', {'tabId': tab_id, 'ref': pick('原生选择'), 'values': ['b']})['verified']
+                assert page.locator('#select').input_value() == 'b'
+                assert tool('browser_select', {'tabId': tab_id, 'ref': pick('原生多选'), 'values': ['a', 'b']})['verified']
+                assert page.locator('#multi').evaluate('(e)=>[...e.selectedOptions].length') == 2
+                assert tool('browser_set_checked', {'tabId': tab_id, 'ref': pick('勾选控件'), 'checked': True})['verified']
+                assert tool('browser_set_checked', {'tabId': tab_id, 'ref': pick('勾选控件'), 'checked': True})['changed'] is False
+                assert page.locator('#check').is_checked() and page.evaluate('counts.check') == 1
+                assert tool('browser_set_checked', {'tabId': tab_id, 'ref': pick('自绘开关'), 'checked': True})['verified']
+                blocked = tool('browser_inspect', {'tabId': tab_id, 'ref': pick('禁用按钮')})
+                assert blocked['disabled'] and blocked['busy']
+                assert tool('browser_inspect', {'tabId': tab_id, 'ref': pick('被遮挡按钮')})['obscured']
+                denied = tool('browser_click', {'tabId': tab_id, 'ref': pick('被遮挡按钮')}, allow_error=True)
+                assert '遮挡' in denied['error']
+                snap = tool('browser_snapshot', {'tabId': tab_id, 'load': 'current'})
+                drag_refs = {e['name']: e['ref'] for e in snap['elements']}
+                tool('browser_drag', {'tabId': tab_id, 'fromRef': drag_refs['HTML拖动源'], 'toRef': drag_refs['放置区域']})
+                assert page.evaluate('counts.drop') == 1
+                report['checks'].append({'name': 'DOM悬停/右键/双击/长按/分裂箭头/焦点组合键/原生选择/幂等勾选/状态等待/HTML5拖放真实副作用', 'passed': True})
+
+                worker.evaluate("handlePopup({type:'set_cdp_enabled',enabled:true})")
+                tool('browser_hover', {'tabId': tab_id, 'ref': pick('CSS菜单')})
+                assert page.locator('.cssmenu').is_visible()
+                tool('browser_press', {'tabId': tab_id, 'ref': pick('键盘菜单'), 'key': 'Alt+ArrowDown'})
+                snap = tool('browser_snapshot', {'tabId': tab_id, 'load': 'current'})
+                drag_refs = {e['name']: e['ref'] for e in snap['elements']}
+                tool('browser_drag', {'tabId': tab_id, 'fromRef': drag_refs['指针拖动源'], 'toRef': drag_refs['指针放置区域']})
+                assert page.evaluate('counts.pointerDrop') == 1
+                active_after = [tab['id'] for tab in worker.evaluate('chrome.tabs.query({active:true})')]
+                assert [tab['id'] for tab in selected] == active_after
+                worker.evaluate("handlePopup({type:'set_cdp_enabled',enabled:false})")
+                report['checks'].append({'name': 'CDP真实CSS悬停/修饰键/指针拖拽，后台选中标签不变', 'passed': True})
+                # 模拟真实Chrome API Promise悬挂：不会阻塞worker事件循环，仍可打开弹窗/重连。
+                tool('browser_navigate', {'tabId': tab_id, 'url': base})
+                page.wait_for_url(base)
+                page.locator('#count').wait_for()
+                snap = tool('browser_snapshot', {'tabId': tab_id, 'load': 'current'})
+                button = next(item['ref'] for item in snap['elements'] if item['name'] == '记录一次')
+                worker.evaluate("""() => {
+                  globalThis.qaScriptOriginal=chrome.scripting.executeScript;
+                  chrome.scripting.executeScript=spec=>spec.args?.[0]==='prepare'&&!globalThis.qaHungEntered
+                    ?new Promise(done=>{globalThis.qaHungEntered=true;globalThis.qaResume=()=>done(qaScriptOriginal(spec))})
+                    :qaScriptOriginal(spec);
+                }""")
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    hung = pool.submit(tool, 'browser_click', {'tabId': tab_id, 'ref': button}, True)
+                    worker.evaluate("async()=>{for(let i=0;i<100&&!globalThis.qaHungEntered;i++)await new Promise(r=>setTimeout(r,20));if(!qaHungEntered)throw new Error('未进入悬挂fixture')}")
+                    worker.evaluate("handlePopup({type:'disconnect'})")
+                    assert worker.evaluate("handlePopup({type:'popup_status'})")['connected'] is False
+                    worker.evaluate("handlePopup({type:'connect'})")
+                    failed = hung.result(timeout=20)
+                    assert 'error' in failed
+                assert next(tab for tab in tool('browser_list_tabs') if tab['id'] == tab_id)
+                worker.evaluate('qaResume()')
+                page.wait_for_timeout(200)
+                assert page.locator('#count').inner_text() == '0', '迟到定位不能继续点击'
+                assert worker.evaluate("handlePopup({type:'popup_status'})")['connected'] is True
+                worker.evaluate('() => { chrome.scripting.executeScript=qaScriptOriginal; }')
+                report['checks'].append({'name': '真实Chrome API悬挂后手动重连恢复poll，迟到prepare不点击', 'passed': True})
+                diagnostics = worker.evaluate("""async()=>{
+                  flushDiagnostics();
+                  for(let i=0;i<10&&diagnosticSending;i++)await diagnosticSending;
+                  await new Promise(r=>setTimeout(r,250));
+                  return (await chrome.storage.local.get('diagnosticLog')).diagnosticLog;
+                }""")
+                timeout = next(e for e in reversed(diagnostics) if e['event'] == 'command_end' and e.get('phase') == 'prepare' and e.get('outcome') == 'timeout')
+                lines = []
+                for suffix in ['', '.1', '.2']:
+                    log = folder / 'bridge' / ('bridge.log' + suffix)
+                    if log.exists():
+                        assert log.stat().st_size <= 1024 * 1024
+                        lines.extend(json.loads(line) for line in log.read_text(encoding='utf-8').splitlines())
+                assert any(e['event'] == 'command_deliver' and e['id'] == timeout['commandId'] for e in lines)
+                assert any(e['event'] == 'extension_event' and e['diagnostic'].get('commandId') == timeout['commandId'] and e['diagnostic'].get('outcome') == 'timeout' for e in lines)
+                status = tool('browser_status')
+                assert status['version'] == manifest['version'] == status['extensionVersion'] == '0.10.1'
+                assert len(diagnostics) <= 128 and len(json.dumps(diagnostics)) <= 65536
+                (OUT / 'diagnostics-real-edge.json').write_text(json.dumps({'status': status, 'timeout': timeout, 'events': lines}, ensure_ascii=False, indent=2), encoding='utf-8')
+                report['checks'].append({'name': '真实Edge诊断跨命令ID关联派发/悬挂prepare/超时、存储有界、桥与扩展版本0.10.1一致', 'passed': True})
+
+                # 停止临时桥模拟网络中断；独立弹窗必须变为异常/正在连接，并自动恢复。
+                popup = context.new_page()
+                popup.goto(f"chrome-extension://{worker.url.split('/')[2]}/popup.html")
+                expect(popup.locator('#status-text')).to_have_text('已连接', timeout=10000)
+                bridge.communicate(timeout=5)
+                expect(popup.locator('#status-text')).not_to_have_text('已连接', timeout=10000)
+                popup.screenshot(path=str(OUT / 'popup-real-bridge-disconnected.png'))
+                restart_script = script.replace('port:0,', f'port:{port},')
+                bridge = subprocess.Popen(['node', '--input-type=module', '-e', restart_script, str(folder / 'bridge')], cwd=ROOT,
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', creationflags=subprocess.CREATE_NO_WINDOW)
+                assert json.loads(bridge.stdout.readline())['port'] == port
+                expect(popup.locator('#status-text')).to_have_text('已连接', timeout=25000)
+                assert next(tab for tab in tool('browser_list_tabs') if tab['id'] == tab_id)
+                worker.evaluate("async()=>{flushDiagnostics();for(let i=0;i<10&&diagnosticSending;i++)await diagnosticSending}")
+                recovered_log = (folder / 'bridge' / 'bridge.log').read_text(encoding='utf-8')
+                assert 'transport_error' in recovered_log or 'status_failed' in recovered_log
+                popup.close()
+                report['checks'].append({'name': '真实桥中断弹窗不再假连接，同端口桥重启自动恢复及MCP列页', 'passed': True})
                 tool('browser_release', {'tabId': tab_id})
                 assert '已释放' in tool('browser_snapshot', {'tabId': tab_id}, allow_error=True)['error']
                 report['checks'].append({'name': '自动授权下释放仍生效', 'passed': True})

@@ -32,6 +32,7 @@ test('/result 404 丢弃过期结果，继续 poll；重复 id 不重执行', as
     },
     countAction: () => { actions++; },
     fetch: async (url, options) => {
+      if (url.endsWith('/diagnostics')) return { ok: true, status: 200, body: { cancel: async () => {} } };
       if (url.endsWith('/pair')) { pairs++; return { ok: true, status: 200, body: { cancel: async () => {} } }; }
       if (url.endsWith('/result')) {
         posts++;

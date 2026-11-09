@@ -97,7 +97,7 @@ POPUP_STUB = '''
 window.fixture={bridgeState:'已连接',connected:true,connecting:false,autoAuthorize:false,cdpEnabled:false,screenshotCdpEnabled:true,cursorHideSec:10,cursorTrailSec:5,bridgePort:17653,authorizedTabIds:[7],revokedTabIds:[]};
 window.fixtureTab={id:7,title:'Magpie · 模型路由面板',url:'https://magpie.example.test/dashboard'};
 window.requests=[];window.failType=null;window.delay=0;
-window.chrome={runtime:{getManifest:()=>({version:'0.9.0'}),sendMessage:async m=>{
+window.chrome={runtime:{getManifest:()=>({version:'__PLUGIN_VERSION__'}),sendMessage:async m=>{
   requests.push(m);if(delay)await new Promise(r=>setTimeout(r,delay));
   if(m.type===failType)return {error:{message:'测试：本机桥不可达，请检查端口'}};
   if(m.type==='popup_status')return {result:{...fixture}};
@@ -113,7 +113,7 @@ window.chrome={runtime:{getManifest:()=>({version:'0.9.0'}),sendMessage:async m=
   if(m.type==='authorize_tab'){fixture.authorizedTabIds=[7];fixture.revokedTabIds=[];}
   return {result:{...fixture}};
 }},tabs:{query:async()=>fixtureTab?[fixtureTab]:[]}};
-'''
+'''.replace('__PLUGIN_VERSION__', json.loads((ROOT / 'extension' / 'manifest.json').read_text(encoding='utf-8'))['version'])
 
 
 try:
@@ -130,7 +130,7 @@ try:
             page.evaluate('scrollTo(0,600)')
             page.locator('#b').evaluate("e=>e.style.left='180px'")
             js = isolated(page, old)
-            agent = '__zcodeTabAgent' if old else '__aiBrowserPageAgent4'
+            agent = '__zcodeTabAgent' if old else '__aiBrowserPageAgent6'
             snap = js(f'{agent}.snapshot()')
             refs = [item['ref'] for item in snap['elements'] if item['tag'] == 'button']
             points = [js(f'{agent}.prepare({json.dumps(ref)})') for ref in refs]
@@ -220,14 +220,14 @@ try:
         assert elapsed['elapsed'] < 50 and elapsed['result']['animated'] is False
         check('后台分支不等待动画（可见性模拟）', elapsed)
 
-        snap = js('__aiBrowserPageAgent4.snapshot()')
+        snap = js('__aiBrowserPageAgent6.snapshot()')
         text_ref = next(item['ref'] for item in snap['elements'] if item['name'] == '测试输入')
-        result = js('__aiBrowserPageAgent4.domFill(' + json.dumps({'ref': text_ref, 'text': 'DOM 模式输入成功'}) + ')')
+        result = js('__aiBrowserPageAgent6.domFill(' + json.dumps({'ref': text_ref, 'text': 'DOM 模式输入成功'}) + ')')
         assert result.get('filled')
         assert page.locator('#text').input_value() == 'DOM 模式输入成功'
         assert {item['type'] for item in page.evaluate('events')} == {'input', 'change'}
         button_ref = next(item['ref'] for item in snap['elements'] if item['name'] == '左侧操作')
-        js(f'__aiBrowserPageAgent4.domClick({json.dumps(button_ref)})')
+        js(f'__aiBrowserPageAgent6.domClick({json.dumps(button_ref)})')
         assert page.locator('output').inner_text() == '1'
         check('真实 DOM 填表/点击及 input/change 事件', page.evaluate('events'))
 
@@ -245,12 +245,12 @@ try:
             '<div role="dialog" style="position:fixed;inset:0;background:#0008;display:grid;place-items:center"><button onclick="this.parentElement.remove()">我知道了</button></div>';
         }''')
         modal_js = isolated(modal_page)
-        modal_snap = modal_js('__aiBrowserPageAgent4.snapshot()')
+        modal_snap = modal_js('__aiBrowserPageAgent6.snapshot()')
         close_ref = next(item['ref'] for item in modal_snap['elements'] if item['tag'] == 'button' and item['name'] == '我知道了')
         assert len(modal_snap['elements']) == 150
         assert modal_snap['coverage']['selectionPriority'] == 'viewport-first'
         modal_page.screenshot(path=str(OUT / 'viewport-modal.png'))
-        modal_js('__aiBrowserPageAgent4.domClick(' + json.dumps(close_ref) + ')')
+        modal_js('__aiBrowserPageAgent6.domClick(' + json.dumps(close_ref) + ')')
         assert modal_page.locator('[role=dialog]').count() == 0
         check('180个离屏控件后仍可定位并关闭屏内弹窗', modal_snap['coverage'])
         modal_page.close()
@@ -264,6 +264,7 @@ try:
         popup.locator('body').screenshot(path=str(OUT / 'popup-before.png'), animations='disabled')
         popup.goto(BASE + '/extension/popup.html')
         popup.wait_for_function("document.querySelector('#status-text').textContent==='已连接'")
+        assert popup.locator('#version').inner_text() == 'v' + json.loads((ROOT / '.zcode-plugin' / 'plugin.json').read_text(encoding='utf-8'))['version']
         popup.locator('body').screenshot(path=str(OUT / 'popup-light.png'), animations='disabled')
         assert popup.locator('#release').is_enabled()
         popup.locator('#release').click()
@@ -289,6 +290,13 @@ try:
         popup.locator('#toggle').click()
         popup.wait_for_function("document.querySelector('#status-text').textContent==='已连接'")
         check('弹窗连接/断开、授权/释放、CDP 开关', True)
+        popup.evaluate("failType='popup_status'")
+        popup.wait_for_function("document.querySelector('#status-text').textContent==='连接异常'", timeout=7000)
+        assert popup.locator('#toggle').inner_text() == '重新连接'
+        popup.locator('body').screenshot(path=str(OUT / 'popup-connection-error.png'), animations='disabled')
+        popup.evaluate('failType=null')
+        popup.wait_for_function("document.querySelector('#status-text').textContent==='已连接'", timeout=7000)
+        check('定时状态读取失败不保留绿色已连接，恢复后重新显示真实状态', True)
         popup.locator('summary').click()
         popup.locator('#cursor-hide').fill('')
         count_before = popup.evaluate('requests.length')

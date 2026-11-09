@@ -57,6 +57,27 @@ test('一键配对白名单：网页拒绝、首连登记、占用互斥、可�
   } finally { await bridge.close(); await fs.rm(configDir, { recursive: true, force: true }); }
 });
 
+test('断开立即清除本客户端心跳与poll，不影响另一客户端', async () => {
+  const configDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ai-browser-unpair-'));
+  const bridge = createBridge({ port: 0, configDir, pollTimeout: 10000 });
+  const port = await bridge.start(), base = `http://127.0.0.1:${port}`;
+  const post = (route, client) => fetch(base + route, { method: 'POST', headers: headers(client), body: '{}' });
+  try {
+    await post('/pair', EXT_A); await post('/pair', EXT_B);
+    const polling = fetch(base + '/poll', { headers: headers(EXT_A) });
+    await new Promise(done => setTimeout(done, 30));
+    await post('/unpair', EXT_B);
+    assert.equal((await (await fetch(base + '/status')).json()).connected, true);
+    await post('/unpair', EXT_A);
+    assert.equal((await polling).status, 204);
+    const state = await (await fetch(base + '/status')).json();
+    assert.equal(state.connected, false);
+    assert.equal(state.client, null);
+    await post('/pair', EXT_A);
+    assert.equal((await (await fetch(base + '/status')).json()).connected, false, '只有pair不能称命令通道连通');
+  } finally { await bridge.close(); await fs.rm(configDir, { recursive: true, force: true }); }
+});
+
 test('白名单持久化：重启桥后已配对扩展直接可用', async () => {
   const configDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zcode-bridge-test-'));
   const first = createBridge({ port: 0, configDir, pollTimeout: 100 });
@@ -179,8 +200,8 @@ test('MCP stdio 握手、工具目录和错误响应', async () => {
   assert.equal(replies.find(x => x.id === 1).result.serverInfo.name, 'ai-browser-17653');
   assert.equal(replies.find(x => x.id === 1).result.serverInfo.version, JSON.parse(await fs.readFile(path.join(root, '.zcode-plugin', 'plugin.json'), 'utf8')).version);
   const tools = replies.find(x => x.id === 2).result.tools;
-  assert.equal(tools.length, 10);
-  assert.equal(new Set(tools.map(x => x.name)).size, 10);
+  assert.equal(tools.length, 17);
+  assert.equal(new Set(tools.map(x => x.name)).size, 17);
   assert.equal(tools.find(x => x.name === 'browser_snapshot').inputSchema.properties.load.default, 'auto');
   assert(tools.find(x => x.name === 'browser_scroll'));
   assert.equal(replies.find(x => x.id === 3).result.isError, true);

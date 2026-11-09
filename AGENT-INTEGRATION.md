@@ -4,6 +4,8 @@
 
 ## 1. 只读检查
 
+0.10.0提供17个工具，工具目录与桥参数校验共用server/protocol.mjs。接入后核对hover/focus/drag/select/set_checked/inspect/wait是否存在，以及click的button/clickCount/holdMs/position、press的ref/组合键参数；旧会话目录需按客户端方式重连，不自行包装HTTP或MCP。菜单、状态和结果验收按仓库技能的[特殊交互参考](skills/ai-browser-control/references/interactions.md)。
+
 1. 查明现有 Node.js 22+ 的绝对路径和仓库绝对路径。
 2. 查接入客户端的官方文档或 `--help`，确认 MCP 配置位置、stdio 格式和生效方式。
 3. 先查已有 `ai-browser-` 条目；主机和端口相同则复用，避免重复接入。

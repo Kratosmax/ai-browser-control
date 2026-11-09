@@ -1,5 +1,61 @@
 # 验证记录
 
+## 2026-11-09：0.10.1仓库交付
+
+用户授权将已验收改动提交并推送现有仓库main；本次提交包含0.9.1连接恢复与有界日志、0.10.0的17工具与技能、0.10.1非标准菜单项定位补丁。推送前源码逐文件SHA-256与已验收交付回执一致，随后仅更新README发布状态及本记录。Node54项、真实Edge扩展链路、UI16项、动态列表7项及技能格式校验通过；日常TAPD悬停、菜单ref、inspect/wait现场验证通过，未提交业务。后台脚本注入暂停原因仍未查实。
+
+temp目录中的日志、截图、浏览器profile、预览包、哈希与回滚证据不入库。下方“本地候选/未推送”等描述是各阶段历史状态；本次不创建标签或GitHub Release。实际远端提交核验回执另存本地交付目录。
+
+## 2026-11-09：0.10.1非标准菜单项定位补丁（本地候选）
+
+- 0.10.0正式17工具加载后，日常TAPD在DOM模式下使用browser_hover成功展开“创建”菜单；snapshot与wait读到“OP功能优化”等选项，截图确认菜单可见，未点击任何创建类型或提交业务。现场随后发现菜单选项未获得ref；只证明悬停展开通过，不声称后续菜单定位已经完整。
+- 同次现场第一次后台snapshot在scripting.inject超时11秒，底层注入未返回；截图被同tab未完成操作保护拒绝。用户选中页面后原注入回执返回，累计149406毫秒，后续snapshot成功。日志证明卡在脚本注入且可见后恢复，尚不足以区分浏览器节能冻结、页面生命周期或其他具体原因。未把该情况当作后台能力全部验收成功。
+- 0.10.1补充tabindex元素、aria-haspopup+controls/owns关联的可见弹层及menu/listbox中的li和自绘pointer项；快照inPopup标记、popup-then-viewport优先级；inspect返回关联popups可见性和候选项数；wait复用同一候选集。仅在明确弹层范围内扩大自绘元素识别，不把普通页面正文全部视为按钮；真实role保持不变。
+- 页面代理5→6，插件/扩展/父市场同步0.10.1；工具数量17及schema不变，不需要再次重启MCP客户端。源码候选识别已通过Node54项、真实Edge扩展链路及7项懒加载回归；新增场景证明无role的li/div可wait、snapshot取得ref、inspect关联及点击本地fixture，180个可见控件下菜单项仍保留。UI回归结果见本阶段交付回执。
+- 用户仅重载扩展后，正式browser_status确认桥与扩展均0.10.1；日常TAPD在DOM模式下再次hover“创建”，wait及截图确认菜单展开。9类创建选项全部有ref，触发器inspect返回关联弹层visible=true；“OP功能优化”项inspect确认visible=true、disabled=false、obscured=false、identityChanged=false，按精确name等待成功。仅展开及读取，未点击创建类型或提交表单；不声称业务创建已验收。候选包含li与内部span/图标，共30个ref，不等于30种创建类型。
+- 现场原始证据temp/qa/interaction-010/tapd-hover-010.png、tapd-hover-010.json、tapd-injection-timeout.json；0.10.1现场回执temp/qa/interaction-0101/tapd-live-verified.json。真实Edge测试使用独立profile和本地fixture，未提交业务数据。UI16项通过；后台注入暂停的具体原因仍未查实，不能据本次前台成功宣称该边界已修复。
+
+## 2026-11-09：0.10.0菜单、特殊交互与状态能力（本地候选）
+
+- 需求来源：用户在TAPD的“创建”按钮上发现仅click无效，要求补充因插件缺少动作、接口或状态导致AI无法执行的能力。本轮共17个工具：新增hover/focus/drag/select/set_checked/inspect/wait；click支持右键、双击、长按和元素内相对位置，press开放已有ref定位并补组合键。源码、扩展及可选父市场同步0.10.0。
+- MCP目录与桥校验统一到server/protocol.mjs，包含有界时长、ref、position、选项数组与等待条件校验；保留原10个方法兼容。快照增加禁用/焦点/勾选/选中/弹层/忙碌等状态，inspect补位置、遮挡、身份变化和原生select选项。wait不更新refs，不以等待超时推断业务动作失败。页面代理代际4→5，新扩展可在旧业务页注入，无需刷新业务页。
+- DOM悬停补pointer/mouse enter、over、move、leave，支持JavaScript菜单；不谎称支持CSS :hover。CDP真实交互沿用原cdpEnabled并保留用户选择；独立截图授权不充当交互授权。下拉select和焦点使用DOM语义。浏览器原生菜单/系统弹窗、跨域iframe、canvas内部目标不在支持范围。长按不额外派发click，CDP浏览器释放时仍可能生成click。
+- 特殊动作核对目标身份和遮挡；拖拽两个端点需同时可操作，CDP按下前移出旧悬停菜单再重定位，移动回执慢时按实际耗时推进，异常清理释放鼠标/修饰键。结果仍actionDispatched/unverified，幂等勾选和原生选择仅验证控件状态，不声称业务已保存。错误带结构化code。诊断沿用1 MiB×3轮转并覆盖新动作阶段。
+- Node54/54通过。覆盖原连接/安装/懒加载身份保护、参数校验新增分支、DOM不偷偷开启CDP、目标ref按键聚焦顺序、CDP按下失败仍释放鼠标及修饰键。真实Edge MV3→临时桥→MCP验证DOM悬停、右键、双击、长按、分裂箭头、焦点组合键、原生单/多选、幂等勾选、状态/等待、HTML5拖放；CDP验证CSS悬停、组合键、后台指针拖拽且选中标签不变。原连接故障和有界诊断回归继续通过。
+- 测试中先发现分裂箭头测试坐标落在按钮padding，改为依据真实箭头区域定位；CDP后台每次mouseMoved回执约1秒，固定12段导致11秒超时，已按实际耗时推进；离开CSS悬停菜单引发布局变化被身份/位置校验拒绝，已在按下前重新定位源。保留失败诊断记录，不以放宽超时或停用校验使测试通过。
+- 真实Edge UI16项、动态列表7项、仓库技能格式校验均通过。popup-light.png已视觉检查v0.10.0及“CDP真实交互”文案。技能新增references/interactions.md，接入规范、安装器生成指引和README同步；不改用户个人规则或其他客户端配置。
+- 日常桥已定向升级0.9.1→0.10.0，MCP进程未结束。扩展及本聊天工具目录尚待用户重载/重连；日常TAPD仅复现过旧DOM点击没有展开菜单，尚未声称新版悬停在该站验收成功。真实功能测试全部使用独立Edge profile和本地fixture，未提交任何业务数据。
+
+证据与回滚：temp/qa/interaction-010/；本地预览temp/ai-browser-control-0.10.0-local-preview.zip。重跑README的Node命令及三个browser-*.py。当前未提交、推送或创建Release。
+
+## 2026-11-09：0.9.1版本与有界诊断日志（本地候选）
+
+- 修正上一阶段运行代码交付仍沿用0.9.0的问题：插件版本源、扩展清单、父目录可选市场条目与README同步0.9.1。README补充运行行为变更交付时递增版本及实际入口核验规则；提交、推送和Release仍按用户授权单独执行，本轮尚未发布。
+- 桥日志改为固定元数据JSON事件，记录排队/派发/结果/超时、轮询和HTTP异常；扩展记录worker会话、连接代际、命令ID、具体Chrome/页面代理阶段、耗时、重试间隔和HTTP状态码。数据白名单不含页面地址/标题/正文、输入值、截图、token或原始错误正文。
+- 当前bridge.log加.1/.2共三份，每份最多1 MiB，单桥最多3 MiB；启动裁剪旧超大日志，轮转失败跳过追加。所有新桥后台启动入口取消stdout文件重定向，避免绕过限制；主进程仅在终端打印启动文本，非交互启动失败记录固定错误码。
+- 扩展环形记录最多128条且少于64 KiB，200毫秒合并存储、底层存储未结束前只有一个写请求；诊断网络补传独立于命令通道，重连自动分批补传。worker重启可能重复上传同一session+seq，按这两个字段识别；记录会滚动覆盖，不保证永久保留或冻结/存储故障时仍可持久化。
+- Node51/51通过：新增日志字节轮转/旧大文件收敛/轮转文件故障、诊断来源校验与批次上限/字段白名单、扩展数量和字节双上限/worker恢复、存储永久悬挂不堆积写请求、断网补传及prepare悬挂阶段记录。原连接、安装、版本一致性回归通过。完整输出为temp/qa/diagnostics-091/node-tests.txt。
+- 真实Edge MV3→桥→MCP全部通过：同一命令ID关联command_deliver和扩展command_end，phase=prepare、outcome=timeout、实测11016毫秒；桥与实际扩展版本均0.9.1。临时桥停止后弹窗退出绿色，原端口重启后自动连通，断线诊断补传成功。证据temp/qa/diagnostics-091/diagnostics-real-edge.json、browser-extension-results.json。
+- 真实Edge UI16项通过，包括实际清单版本显示、断线异常、连接按钮、输入/截图独立开关、动效、深色和200%缩放。截图popup-real-bridge-disconnected.png显示v0.9.1及“连接中断，自动重试中”。测试使用独立profile/本地fixture，未操作用户业务正文或表单。本轮未改懒加载算法，未重复browser-loading.py。
+- 日常桥经已有更新器定向替换17653实例，实际health版本0.9.0→0.9.1；未结束MCP进程、未改客户端配置。用户重载扩展后，正式browser_status确认version与extensionVersion均为0.9.1、connected=true、standby=false、pending=0。browser_list_tabs往返成功；磁盘日志包含同一ID的command_deliver/command_result及扩展command_start、tabs.query起止、command_end。配置与token文件哈希未变，现有日志文件均小于1 MiB；证据live-after-reload.json、live-log-check.json。
+
+重跑：README的Node命令、python -X utf8 tests/browser-extension.py、python -X utf8 tests/browser-ui.py。当前改动及回滚包保存在temp/qa/diagnostics-091/，本地预览为temp/ai-browser-control-0.9.1-local-preview.zip；均不进入仓库。
+
+## 2026-11-09：连接假正常与轮询悬挂修复（本地候选）
+
+- 已执行 `git pull --ff-only`，远端和本地基线均为 `8f662fb` / 0.9.0。用户原始截图、03:01至03:07故障窗口的桥日志及修改前源码保存在忽略的 `temp/qa/connection-20261109/`。
+- 日志证明03:01:07最后一次poll后，03:04:32 unpair、03:04:33 pair，没有新poll，直到03:07:14才恢复。历史日志未记录被派发的具体命令，不能确认当时是哪一条Chrome API悬挂，也不能归因其他agent抢占。
+- 已复现代码缺陷：`execute`无限等待会堵住单个pollLoop，alarm只检查loopPromise是否存在，connect仅重新pair无法恢复；弹窗以paired判连接，且定时refresh错误被吞掉。桥unpair不清旧心跳也会造成短暂假连接。
+- 修复：11秒命令等待上限；超时回执与id去重；底层未结束时锁住该tab防止重复动作；派发Chrome动作前后检查连接代际和超时状态，包括页面代理内部授权/注入的异步边界。已发给Chrome的动作仍可能结束，故保持结果不确定；不声称超时等于取消。
+- 配对请求去重、旧代际响应隔离、所有传输请求可失效且有硬期限；结果重传前重新配对；弹窗核对桥自身心跳和近期轮询，读取失败显示异常；显式断开只清当前扩展的活动poll/心跳。MCP错误文案区分桥可达与扩展通道不可用。新增桥日志仅含派发id/method。
+- Node44/44通过。新增回归覆盖悬挂命令到期继续poll、同id不重放、迟到prepare/注入不写入、pair-only不假连接、断开后旧pair不复活、响应正文不结束仍超时、结果403后重新配对、unpair不影响其他扩展。
+- 真实Edge MV3→临时桥→MCP：故意挂起Chrome prepare，手动断开重连后恢复list_tabs；释放旧Promise后页面计数仍0。真实停止临时桥时弹窗退出已连接，原端口桥恢复后自动重连并可list_tabs。`tests/browser-extension.py`整体通过。该测试仅使用独立profile/本地fixture，未操作用户业务页面。
+- 真实Edge UI16项通过，包含定时popup_status失败不保留绿色旧状态。截图 `temp/qa/popup-real-bridge-disconnected.png`、`popup-connection-error.png`，结构化结果 `browser-extension-results.json`、`browser-ui-results.json`，本次归档另存connection-20261109目录。
+- 独立只读代码审查曾发现pageAgent内部guard遗漏，已修复并补注入迟到回归；最终审查未发现其他阻断项。尚不能验证所有浏览器挂起/系统休眠策略，完全冻结worker事件循环时定时器也无法实时运行；恢复后需重新确认通道。
+- 日常桥已由旧PID56428替换为加载本轮源码的PID55672，仍使用127.0.0.1:17653；配置与token文件哈希未变化。用户确认重载扩展后，正式MCP回读connected=true、standby=false、pending=0、心跳距回读3130毫秒；list_tabs命令往返成功，返回5个标签页，未读取业务页正文。当前MCP进程未重启，状态说明文案仍为旧文案，不影响桥端修复生效。
+
+重跑命令：沿用README中的Node、browser-ui.py、browser-extension.py。本阶段未更改页面懒加载算法，未重复browser-loading.py。此阶段曾保留0.9.0，随后已在上方版本与诊断日志阶段更正为0.9.1；未提交、推送或发布这次修复。
+
 ## 0.9.0 仓库更新与本机升级（2026-11-05）
 
 用户已授权提交、推送现有GitHub仓库并更新本机。本轮包含此前验收的交互改造、输入/截图独立开关、动态列表能力和仓库分发技能；版本由0.8.1升级为0.9.0。插件清单为服务版本源，扩展清单同步版本，本地父目录市场条目同步0.9.0。未创建标签或GitHub Release。
