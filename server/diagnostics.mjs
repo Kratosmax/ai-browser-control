@@ -6,8 +6,8 @@ export const LOG_MAX_BYTES = 1024 * 1024;
 export const LOG_BACKUPS = 2;
 
 // 一个桥进程是日志的唯一写入方；不把子进程 stdout 重定向到这些文件。
-export function createLogger(dir, { maxBytes = LOG_MAX_BYTES, backups = LOG_BACKUPS } = {}) {
-  const file = path.join(dir, 'bridge.log');
+export function createLogger(dir, { maxBytes = LOG_MAX_BYTES, backups = LOG_BACKUPS, filename = 'bridge.log' } = {}) {
+  const file = path.join(dir, filename);
   const size = name => { try { return fs.statSync(name).size; } catch (e) { if (e.code === 'ENOENT') return 0; throw e; } };
   const trim = name => {
     const length = size(name);
@@ -28,11 +28,14 @@ export function createLogger(dir, { maxBytes = LOG_MAX_BYTES, backups = LOG_BACK
       if (line.length > maxBytes) return;
       trim(file);
       if (size(file) + line.length > maxBytes) {
-        fs.rmSync(`${file}.${backups}`, { force: true });
-        for (let i = backups - 1; i >= 1; i--) {
-          if (fs.existsSync(`${file}.${i}`)) fs.renameSync(`${file}.${i}`, `${file}.${i + 1}`);
+        if (backups === 0) fs.writeFileSync(file, '');
+        else {
+          fs.rmSync(`${file}.${backups}`, { force: true });
+          for (let i = backups - 1; i >= 1; i--) {
+            if (fs.existsSync(`${file}.${i}`)) fs.renameSync(`${file}.${i}`, `${file}.${i + 1}`);
+          }
+          if (fs.existsSync(file)) fs.renameSync(file, `${file}.1`);
         }
-        if (fs.existsSync(file)) fs.renameSync(file, `${file}.1`);
       }
       fs.appendFileSync(file, line);
     } catch { /* 轮转失败时跳过写入，不退回无界追加。 */ }

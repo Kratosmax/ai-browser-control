@@ -1,4 +1,5 @@
 'use strict';
+importScripts('tasks.js');
 
 const ALARM = 'zcode-bridge-wakeup';
 const authorized = new Set();
@@ -29,6 +30,27 @@ let pairing = null;
 let lastPollAt = 0;
 let commandStartedAt = 0;
 const runningTabs = new Set();
+const taskTabs = new AiBrowserTasks(chrome, tabId => runningTabs.has(tabId), async tab => {
+  if (revoked.has(tab.id)) return 'released';
+  if (!authorized.has(tab.id) && !autoAuthorize) return 'not-authorized';
+  try {
+    const results = await bounded(chrome.scripting.executeScript({ target: { tabId: tab.id }, world: 'ISOLATED', func: () => {
+      return [...document.querySelectorAll('input:not([type=hidden]),textarea,select,[contenteditable=true]')].some(el => {
+        if (el.isContentEditable) return el.textContent.trim().length > 0;
+        if (el instanceof HTMLSelectElement) {
+          const options = [...el.options];
+          if (el.multiple) return options.some(option => option.selected !== option.defaultSelected);
+          const explicit = options.findLastIndex(option => option.defaultSelected);
+          const initial = explicit >= 0 ? explicit : options.findIndex(option => !option.disabled && !option.closest('optgroup[disabled]'));
+          return el.selectedIndex !== initial;
+        }
+        return ['checkbox', 'radio'].includes(el.type) ? el.checked !== el.defaultChecked : el.value !== el.defaultValue;
+      });
+    } }), 500, '表单状态检查超时');
+    return results[0]?.result === false ? null : 'form-state';
+  } catch { return 'unverified-form-state'; }
+});
+const domFallbackTabs = new Set();
 let pendingResult = null;
 let bridgeState = '未连接';
 let bridgeFailures = 0;
@@ -308,20 +330,28 @@ async function press(tabId, key, check = () => {}) {
 }
 
 async function listTabs(check = () => {}) {
+  await taskTabs.ready;
   const tabs = await browserStep(check, 'tabs.query', () => chrome.tabs.query({}));
-  return tabs.filter((tab) => isHttpUrl(tab.url)).map((tab) => ({
+  return tabs.filter((tab) => isHttpUrl(tab.url)).map((tab) => {
+    const useCdp = cdpEnabled && !domFallbackTabs.has(tab.id);
+    return {
     id: tab.id,
     title: tab.title || '',
     url: tab.url,
     active: Boolean(tab.active),
+    managed: taskTabs.tabs.has(tab.id),
+    taskId: taskTabs.tabs.get(tab.id)?.taskId,
+    taskName: taskTabs.tabs.get(tab.id)?.name,
+    groupId: tab.groupId,
     authorized: !revoked.has(tab.id) && (authorized.has(tab.id) || autoAuthorize),
-    inputMode: cdpEnabled ? 'cdp' : 'dom',
+    inputMode: useCdp ? 'cdp' : 'dom',
+    domFallback: domFallbackTabs.has(tab.id),
     screenshotMode: screenshotCdpEnabled ? 'cdp' : 'active-tab',
-    capabilities: { hover: cdpEnabled ? 'cdp' : 'dom-events', cssHover: cdpEnabled,
-      pointer: cdpEnabled ? 'cdp' : 'synthetic', drag: cdpEnabled ? 'cdp-pointer' : 'synthetic-pointer-and-html5',
+    capabilities: { hover: useCdp ? 'cdp' : 'dom-events', cssHover: useCdp,
+      pointer: useCdp ? 'cdp' : 'synthetic', drag: useCdp ? 'cdp-pointer' : 'synthetic-pointer-and-html5',
       nativeSelect: 'dom', inspect: true, wait: true, focus: true,
       nativeBrowserMenus: false, systemDialogs: false, canvasTargets: false }
-  }));
+  }; });
 }
 
 async function release(tabId, check = () => {}) {
@@ -379,6 +409,20 @@ async function execute(command, check = () => {}) {
     return { bridge: `http://127.0.0.1:${bridgePort}`, port: bridgePort, autoAuthorize, authorizedTabIds: [...authorized] };
   }
   if (method === 'list_tabs') return listTabs(check);
+  if (method === 'task') return taskTabs.task(params, check);
+  if (method === 'batch') {
+    const results = await Promise.all(params.commands.map(async (item, index) => {
+      try { return { ok: true, result: await executeBounded({ id: `${command.id}-${index}`, ...item }, check) }; }
+      catch (error) { return { ok: false, error: { code: error.code || 'BROWSER_ACTION_FAILED', message: errorMessage(error), outcome: 'unverified' } }; }
+    }));
+    let bytes = 0;
+    for (let index = 0; index < results.length; index++) {
+      const size = JSON.stringify(results[index]).length;
+      if (bytes + size > 10 * 1024 * 1024) results[index] = { ok: false, error: { code: 'RESULT_TOO_LARGE', message: '本批次图像过大，请单独截图该页；其他结果保留', outcome: 'unverified' } };
+      else bytes += size;
+    }
+    return { results };
+  }
   if (method === 'open') {
     if (typeof params.url !== 'string' || !isHttpUrl(params.url)) throw Object.assign(new Error('url必须是HTTP(S)地址'), { code: 'INVALID_ARGUMENTS' });
     let windowId;
@@ -390,10 +434,11 @@ async function execute(command, check = () => {}) {
     if (!Number.isInteger(windowId) || windowId < 0) throw Object.assign(new Error('没有可用的普通浏览器窗口'), { code: 'NO_BROWSER_WINDOW' });
     const beforeWindow = await browserStep(check, 'windows.get', () => chrome.windows.get(windowId));
     check();
-    const tab = await browserStep(check, 'tabs.create', () => chrome.tabs.create({ windowId, url: params.url, active: false,
-      ...(params.tabId === undefined ? {} : { openerTabId: params.tabId }) }));
+    const opened = await browserStep(check, 'tabs.create', () => taskTabs.open(params, windowId, check));
+    const { tab } = opened;
     const afterWindow = await browserStep(check, 'windows.get', () => chrome.windows.get(windowId));
-    return { opened: true, tabId: tab.id, windowId: tab.windowId, active: tab.active === true,
+    return { opened: !opened.reused, reused: opened.reused, taskId: opened.taskId, groupId: opened.groupId, groupError: opened.groupError,
+      tabId: tab.id, windowId: tab.windowId, active: tab.active === true,
       windowFocusedBefore: beforeWindow.focused === true, windowFocusedAfter: afterWindow.focused === true,
       requestedActive: false, authorized: !revoked.has(tab.id) && (autoAuthorize || authorized.has(tab.id)),
       verificationRequired: '请按返回的新tabId读取；未授权时需用户授权，不能自动激活页面。' };
@@ -416,7 +461,7 @@ async function execute(command, check = () => {}) {
         { type: 'mouseReleased', x: point.x, y: point.y, button, buttons: 0, clickCount }), 1000, '释放鼠标等待超时');
     };
     const dispatched = extra => ({ actionDispatched: true, outcome: 'unverified',
-      mode: cdpEnabled ? 'cdp' : 'dom', trusted: cdpEnabled,
+      mode: useCdp ? 'cdp' : 'dom', trusted: useCdp, fallbackReason,
       verificationRequired: '请用wait或snapshot(load=current)确认同一目标的预期菜单/业务状态。', ...extra });
     const prepareTarget = async (ref, expectedContext, position) => {
       const target = { ref, expectedContext, position, action: method };
@@ -430,9 +475,32 @@ async function execute(command, check = () => {}) {
     if (method === 'release') return release(tabId, check);
     // snapshot（读取）走 ensureAllowed；写入类命令在首个 CDP 调用时经 ensureAttached 附加调试器。
     const currentTab = await ensureAllowed(tabId, check);
+    const inputActions = ['click', 'hover', 'drag', 'set_checked', 'fill', 'press'];
+    let useCdp = cdpEnabled && params.mode !== 'dom' && (params.mode === 'cdp' || !domFallbackTabs.has(tabId));
+    let fallbackReason;
+    if (inputActions.includes(method)) {
+      if (params.mode === 'cdp' && !cdpEnabled) throw Object.assign(new Error('CDP真实交互开关已关闭，不能通过参数开启'), { code: 'CDP_DISABLED' });
+      if (params.mode === 'dom' || !useCdp) {
+        if (attached.has(tabId)) await detach(tabId, check);
+      } else {
+        try { await ensureAttached(tabId, 'input', check); domFallbackTabs.delete(tabId); }
+        catch (error) {
+          check();
+          if (params.mode === 'cdp') throw error;
+          // 仅在输入尚未派发时降级。执行阶段失败不能重放点击/提交。
+          if (attached.has(tabId)) await detach(tabId, check);
+          await ensureAllowed(tabId, check);
+          useCdp = false;
+          domFallbackTabs.add(tabId);
+          fallbackReason = 'CDP_ATTACH_FAILED';
+        }
+      }
+    }
+    if (['fill', 'select', 'set_checked', 'drag', 'press'].includes(method)) taskTabs.markModified(tabId);
     switch (method) {
       case 'snapshot':
-        return agent('snapshot', { load: params.load ?? 'auto' });
+        return { ...await agent('snapshot', { load: params.load ?? 'auto' }),
+          verificationHint: 'DOM有遮挡、身份歧义、截断或状态矛盾时，先browser_screenshot核对可见结果；截图不能证明未加载数据完整。' };
       case 'scroll':
         return agent('scroll', { direction: params.direction, ref: params.ref });
       case 'inspect':
@@ -457,7 +525,7 @@ async function execute(command, check = () => {}) {
         if (actual(before.checked) === params.checked) return { checked: params.checked, changed: false, verified: true };
         if (!params.checked && (before.role === 'radio' || before.inputType === 'radio')) throw Object.assign(new Error('radio不能单独取消，请选择其他radio'), { code: 'UNSUPPORTED_ACTION' });
         const point = await prepareTarget(params.ref, params.expectedContext);
-        if (cdpEnabled) {
+        if (useCdp) {
           await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y });
           try { await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 }); }
           finally { await cleanupUp(point); }
@@ -467,16 +535,16 @@ async function execute(command, check = () => {}) {
       }
       case 'hover': {
         const point = await prepareTarget(params.ref, params.expectedContext, params.position);
-        if (cdpEnabled) await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y });
+        if (useCdp) await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y });
         else await agent('domHover', { ref: params.ref, point });
         await new Promise(done => setTimeout(done, params.durationMs ?? 300));
         check();
         const held = await agent('holdHover', { ref: params.ref });
-        return dispatched({ cssHover: cdpEnabled, cursorHeld: held.held === true, note: cdpEnabled ? '浏览器指针已移动，系统鼠标不动。' : '合成悬停事件不能设置CSS :hover，也不保证网站接受非可信事件。' });
+        return dispatched({ cssHover: useCdp, cursorHeld: held.held === true, note: useCdp ? '浏览器指针已移动，系统鼠标不动。' : '合成悬停事件不能设置CSS :hover，也不保证网站接受非可信事件。' });
       }
       case 'drag': {
         let from = await prepareTarget(params.fromRef, params.expectedFromContext);
-        if (cdpEnabled) {
+        if (useCdp) {
           // 离开此前悬停菜单可能改变布局；按下前先完成移入并重新定位源。
           await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: from.x, y: from.y });
           from = await agent('prepare', { ref: params.fromRef, expectedContext: params.expectedFromContext, action: 'drag' });
@@ -487,7 +555,7 @@ async function execute(command, check = () => {}) {
         if (Math.hypot(finalFrom.x - from.x, finalFrom.y - from.y) > 2) throw Object.assign(new Error('两个拖拽目标需同时位于可操作视口，请先滚动定位'), { code: 'TARGET_CHANGED' });
         if ((await agent('inspect', params.fromRef)).inViewport === false || (await agent('inspect', params.toRef)).inViewport === false) throw Object.assign(new Error('两个拖拽目标需同时位于可操作视口'), { code: 'TARGET_OUTSIDE_VIEWPORT' });
         const durationMs = params.durationMs ?? 400;
-        if (!cdpEnabled) return dispatched(await agent('domDrag', { fromRef: params.fromRef, toRef: params.toRef, from, to, durationMs }));
+        if (!useCdp) return dispatched(await agent('domDrag', { fromRef: params.fromRef, toRef: params.toRef, from, to, durationMs }));
         let last = from;
         await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: from.x, y: from.y });
         try {
@@ -506,8 +574,6 @@ async function execute(command, check = () => {}) {
         return dispatched();
       }
       case 'click': {
-        const useCdp = cdpEnabled;
-        if (useCdp) await ensureAttached(tabId, 'input', check);
         const target = { ref: params.ref, expectedContext: params.expectedContext, position: params.position, action: 'click' };
         const { x, y } = await agent('prepare', target);
         await agent('showCursor', { x, y, hideMs: cursorHideMs, trailMs: cursorTrailMs, animate: currentTab.active });
@@ -538,17 +604,16 @@ async function execute(command, check = () => {}) {
         try { after = await agent('inspect', params.ref); } catch { after = { unavailable: true }; }
         return { clicked: !params.holdMs, actionDispatched: true, outcome: 'unverified', target: final.target, after,
           verificationRequired: 'clicked 只表示派发点击。请 snapshot(load=current)，核对同一业务对象的身份及预期状态；不能只数收起按钮。',
-          mode: useCdp ? 'cdp' : 'dom', ...(useCdp ? {} : { trusted: false }) };
+          mode: useCdp ? 'cdp' : 'dom', fallbackReason, ...(useCdp ? {} : { trusted: false }) };
       }
       case 'fill':
         if (typeof params.text !== 'string') throw new Error('text 必须是字符串');
-        if (cdpEnabled) await ensureAttached(tabId, 'input', check);
         const spot = await agent('prepare', params.ref);
         await agent('showCursor', { x: spot.x, y: spot.y, hideMs: cursorHideMs, trailMs: cursorTrailMs, animate: currentTab.active });
-        if (!cdpEnabled) {
+        if (!useCdp) {
           const result = await agent('domFill', { ref: params.ref, text: params.text });
           try { await agent('cursorPulse', { ...spot, hideMs: cursorHideMs }); } catch {}
-          return result;
+          return { ...result, fallbackReason };
         }
         await agent('focus', params.ref);
         await press(tabId, 'Control+A', check);
@@ -564,13 +629,14 @@ async function execute(command, check = () => {}) {
           await agent('focusTarget', params.ref);
           await agent('cursorPulse', { x: spot.x, y: spot.y, hideMs: cursorHideMs });
         }
-        if (!cdpEnabled) return agent('domPress', params.key);
+        if (!useCdp) return { ...await agent('domPress', params.key), fallbackReason };
         await press(tabId, params.key, check);
         return { pressed: true, mode: 'cdp' };
       case 'navigate':
         if (typeof params.url !== 'string' || !isHttpUrl(params.url)) throw new Error('url 必须是绝对 HTTP(S) 地址');
         check();
         await browserStep(check, 'tabs.update', () => chrome.tabs.update(tabId, { url: params.url }));
+        domFallbackTabs.delete(tabId);
         return { navigated: true, url: params.url };
       case 'screenshot': {
         if (!screenshotCdpEnabled) return visibleScreenshot(tabId, check);
@@ -657,7 +723,8 @@ async function ensurePaired() {
   try { await work; } finally { if (pairing === work) pairing = null; }
 }
 
-async function executeBounded(command) {
+async function executeBounded(command, parentCheck = () => {}) {
+  parentCheck();
   const tabId = command.params?.tabId;
   const meta = { commandId: String(command.id), method: command.method, tabId, epoch: connectionEpoch, port: bridgePort };
   if (runningTabs.has(tabId)) {
@@ -669,7 +736,7 @@ async function executeBounded(command) {
   let expired = false;
   const epoch = connectionEpoch;
   const started = Date.now();
-  const check = () => { if (expired || epoch !== connectionEpoch || wantDisconnect) throw Object.assign(new Error('原操作已过期或连接已变化，未继续派发动作；已派发部分结果不确定。'), { code: 'invalidated' }); };
+  const check = () => { parentCheck(); if (expired || epoch !== connectionEpoch || wantDisconnect) throw Object.assign(new Error('原操作已过期或连接已变化，未继续派发动作；已派发部分结果不确定。'), { code: 'invalidated' }); };
   check.diagnostic = meta;
   check.phase = 'queue';
   diagnostic('command_start', meta);
@@ -713,7 +780,7 @@ async function connectionStatus() {
   return { bridgeState, connected: !wantDisconnect && verified, connecting: !wantDisconnect && !verified,
     autoAuthorize, cdpEnabled, screenshotCdpEnabled, cursorHideSec: Math.round(cursorHideMs / 1000),
     cursorTrailSec: Math.round(cursorTrailMs / 1000), bridgePort, authorizedTabIds: [...authorized], revokedTabIds: [...revoked],
-    commandRunning: commandStartedAt > 0, lastPollAt: lastPollAt || null };
+    commandRunning: runningTabs.size > 0, lastPollAt: lastPollAt || null };
 }
 
 function remember(id, payload) {
@@ -918,7 +985,7 @@ chrome.debugger.onDetach.addListener((source) => {
     revoked.add(source.tabId);
   }
 });
-chrome.tabs.onRemoved.addListener((tabId) => { authorized.delete(tabId); attached.delete(tabId); revoked.delete(tabId); });
+chrome.tabs.onRemoved.addListener((tabId) => { authorized.delete(tabId); attached.delete(tabId); revoked.delete(tabId); domFallbackTabs.delete(tabId); taskTabs.removed(tabId); });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === ALARM) startPolling();
 });

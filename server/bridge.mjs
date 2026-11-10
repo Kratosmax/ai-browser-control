@@ -286,7 +286,16 @@ export async function bridgeRequest(route, { port = DEFAULT_PORT, host = '127.0.
   return data;
 }
 
-export async function ensureBridge(port = DEFAULT_PORT, { host = '127.0.0.1', token = '' } = {}) {
+const ensuring = new Map();
+export function ensureBridge(port = DEFAULT_PORT, options = {}) {
+  const key = `${options.host ?? '127.0.0.1'}:${port}`;
+  if (ensuring.has(key)) return ensuring.get(key);
+  const work = ensureBridgeOnce(port, options).finally(() => { if (ensuring.get(key) === work) ensuring.delete(key); });
+  ensuring.set(key, work);
+  return work;
+}
+
+async function ensureBridgeOnce(port, { host = '127.0.0.1', token = '' } = {}) {
   const headers = token ? { Authorization: `Bearer ${token}` } : {};
   const healthy = async () => {
     try {
@@ -310,7 +319,7 @@ export async function ensureBridge(port = DEFAULT_PORT, { host = '127.0.0.1', to
   child.unref();
   for (let attempt = 0; attempt < 30; attempt++) {
     await new Promise(resolve => setTimeout(resolve, 100));
-    try { await bridgeRequest('/status', { port, timeout: 500 }); return; } catch {}
+    try { await bridgeRequest('/status', { port, timeout: 500 }); return { launched: true, pid: child.pid }; } catch {}
   }
   throw new Error(`本机桥启动失败，请检查 ${path.join(dir, 'bridge.log')}`);
 }

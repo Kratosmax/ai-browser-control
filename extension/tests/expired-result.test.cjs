@@ -22,7 +22,7 @@ test('/result 404 丢弃过期结果，继续 poll；重复 id 不重执行', as
     setTimeout: (fn, ms) => { const id = ++timerId; timers.set(id, { fn, ms }); return id; },
     clearTimeout: (id) => timers.delete(id),
     chrome: {
-      storage: { local: { get: async () => ({}), set: async () => {}, remove: async () => {} } },
+      storage: { session: { get: async () => ({}), set: async () => {} }, local: { get: async () => ({}), set: async () => {}, remove: async () => {} } },
       runtime: {
         onMessage: event, onInstalled: event, onStartup: event,
         getManifest: () => ({ name: 'AI Browser Control' })
@@ -48,6 +48,7 @@ test('/result 404 丢弃过期结果，继续 poll；重复 id 不重执行', as
       });
     }
   });
+  context.importScripts = name => vm.runInContext(fs.readFileSync(path.resolve(__dirname, '..', name), 'utf8'), context);
   vm.runInContext(source, context);
   // 此用例仅验证协议控制流，实际动作在mock.test.cjs另行覆盖。
   vm.runInContext('execute = async () => { countAction(); return {clicked: true}; };', context);

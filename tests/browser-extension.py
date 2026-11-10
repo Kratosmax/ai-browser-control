@@ -68,7 +68,8 @@ try:
             "const qaGet=chrome.storage.local.get.bind(chrome.storage.local);"
             "chrome.storage.local.get=async(...args)=>{await qaInit;return qaGet(...args)};importScripts('background.js');", encoding='utf-8')
 
-        mcp = subprocess.Popen(['node', 'server/mcp.mjs', '--port', str(port)], cwd=ROOT,
+        # 本文件验证手动桥重启；自动监督在browser-lifecycle.py独立验证。
+        mcp = subprocess.Popen(['node', 'server/mcp.mjs', '--host', 'localhost', '--port', str(port)], cwd=ROOT,
                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', creationflags=subprocess.CREATE_NO_WINDOW)
         sequence = 0
 
@@ -110,7 +111,7 @@ try:
                 active_before_open = [t['id'] for t in worker.evaluate('chrome.tabs.query({active:true})')]
                 focus_before_open = {w['id']: w['focused'] for w in worker.evaluate('chrome.windows.getAll()')}
                 worker.evaluate("()=>{globalThis.qaTabActivations=[];chrome.tabs.onActivated.addListener(info=>qaTabActivations.push(info.tabId))}")
-                opened = tool('browser_open', {'url': base + '?background-open=1', 'tabId': tab_id})
+                opened = tool('browser_open', {'url': base + '?background-open=1', 'tabId': tab_id, 'taskId': 'background-test', 'taskName': '后台打开验收'})
                 assert opened['active'] is False and opened['requestedActive'] is False
                 assert opened['windowFocusedBefore'] == focus_before_open[opened['windowId']]
                 assert opened['windowFocusedAfter'] == focus_before_open[opened['windowId']]
@@ -119,11 +120,11 @@ try:
                 assert {w['id']: w['focused'] for w in worker.evaluate('chrome.windows.getAll()')} == focus_before_open
                 assert worker.evaluate('qaTabActivations') == []
                 assert 'Magpie' in tool('browser_snapshot', {'tabId': opened['tabId'], 'load': 'current'})['title']
-                opened_default = tool('browser_open', {'url': base + '?background-open=2'})
+                opened_default = tool('browser_open', {'url': base + '?background-open=2', 'taskId': 'background-test', 'taskName': '后台打开验收'})
                 assert opened_default['windowId'] == opened['windowId'] and opened_default['active'] is False
                 assert worker.evaluate('qaTabActivations') == []
                 worker.evaluate(f'chrome.tabs.remove([{opened["tabId"]},{opened_default["tabId"]}])')
-                report['checks'].append({'name': '指定网址默认后台新建，18工具链路读取成功，原选中页与窗口focused状态不变且无onActivated事件', 'passed': True})
+                report['checks'].append({'name': '指定网址后台分组，20工具链路读取成功，原选中页与窗口focused状态不变且无onActivated事件', 'passed': True})
                 snap = tool('browser_snapshot', {'tabId': tab_id})
                 assert 'Magpie' in snap['title']
                 assert snap['coverage']['scope'] == 'loaded-dom'
@@ -371,10 +372,10 @@ try:
                 assert any(e['event'] == 'command_deliver' and e['id'] == timeout['commandId'] for e in lines)
                 assert any(e['event'] == 'extension_event' and e['diagnostic'].get('commandId') == timeout['commandId'] and e['diagnostic'].get('outcome') == 'timeout' for e in lines)
                 status = tool('browser_status')
-                assert status['version'] == manifest['version'] == status['extensionVersion'] == '0.11.0'
+                assert status['version'] == manifest['version'] == status['extensionVersion'] == '0.12.0'
                 assert len(diagnostics) <= 128 and len(json.dumps(diagnostics)) <= 65536
                 (OUT / 'diagnostics-real-edge.json').write_text(json.dumps({'status': status, 'timeout': timeout, 'events': lines}, ensure_ascii=False, indent=2), encoding='utf-8')
-                report['checks'].append({'name': '真实Edge诊断跨命令ID关联派发/悬挂prepare/超时、存储有界、桥与扩展版本0.11.0一致', 'passed': True})
+                report['checks'].append({'name': '真实Edge诊断跨命令ID关联派发/悬挂prepare/超时、存储有界、桥与扩展版本0.12.0一致', 'passed': True})
 
                 # 停止临时桥模拟网络中断；独立弹窗必须变为异常/正在连接，并自动恢复。
                 popup = context.new_page()

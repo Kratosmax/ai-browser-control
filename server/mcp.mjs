@@ -1,5 +1,8 @@
 import readline from 'node:readline';
 import { ensureBridge, bridgeRequest, VERSION } from './bridge.mjs';
+import { bridgeDir, isLoopbackAddress } from './bridge.mjs';
+import { createLogger } from './diagnostics.mjs';
+import { superviseBridge } from './supervisor.mjs';
 
 // 每个桥实例对应一个 MCP 进程实例：
 //   本机：node mcp.mjs [--port 17653]
@@ -12,6 +15,11 @@ const HOST = hostIndex >= 0 ? process.argv[hostIndex + 1] : '127.0.0.1';
 const tokenIndex = process.argv.indexOf('--token');
 const TOKEN = tokenIndex >= 0 ? process.argv[tokenIndex + 1] : '';
 const SERVER_NAME = HOST === '127.0.0.1' ? `ai-browser-${PORT}` : `ai-browser-${HOST.replaceAll('.', '-')}-${PORT}`;
+const supervisor = isLoopbackAddress(HOST) ? superviseBridge({
+  ensure: () => ensureBridge(PORT, { host: HOST, token: TOKEN }),
+  // 固定有界文件，不按PID增加文件；日志失败不影响监督。
+  log: createLogger(bridgeDir(PORT), { filename: 'supervisor.log', backups: 0 })
+}) : null;
 
 export { tools } from './protocol.mjs';
 import { tools } from './protocol.mjs';
@@ -33,6 +41,12 @@ async function callTool(name, args) {
     if (typeof data.result?.data !== 'string' || data.result.mimeType !== 'image/png') throw new Error('浏览器未返回有效 PNG 截图');
     return { content: [{ type: 'image', data: data.result.data, mimeType: 'image/png' }] };
   }
+  if (name === 'browser_batch') {
+    const content = [{ type: 'text', text: JSON.stringify(data.result.results.map((item, index) =>
+      item.result?.mimeType === 'image/png' ? { index, ok: item.ok, screenshot: true, tabId: args.commands[index].params.tabId } : { index, ...item })) }];
+    for (const item of data.result.results) if (item.result?.mimeType === 'image/png') content.push({ type: 'image', data: item.result.data, mimeType: 'image/png' });
+    return { content };
+  }
   return { content: [{ type: 'text', text: JSON.stringify(data.result) }] };
 }
 
@@ -52,6 +66,7 @@ async function handle(message) {
 }
 
 const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+input.on('close', () => supervisor?.stop());
 input.on('line', line => {
   if (!line.trim()) return;
   try { void handle(JSON.parse(line)).catch(error => console.error(error.message)); }

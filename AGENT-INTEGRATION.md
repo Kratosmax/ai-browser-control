@@ -8,6 +8,10 @@
 
 0.11.0新增browser_open，共18个工具。新开指定网址默认后台，不激活窗口；原browser_navigate仅导航已有页。更新后核对工具目录出现browser_open；只更新扩展不能刷新客户端缓存的MCP目录。不要为此缺口静默改用会拉起前台浏览器的其他入口。
 
+0.12.0共20个工具，新增browser_task与browser_batch；open新增必填taskId/taskName及可选reuseKey/reuse，输入工具支持mode=auto/dom/cdp。旧目录的open(url)需要重连接入新版定义，避免继续创建无任务归属页。接入时必须随同加载仓库skills/ai-browser-control/SKILL.md，任务分组、复用、收尾清理与截图复查规范见其[任务参考](skills/ai-browser-control/references/tasks-and-verification.md)。客户端无法自动传递聊天名/完成事件时，由agent显式传taskName和finish，不假装协议能识别任务结算。
+
+本地MCP启动即检查桥，存活期间每5秒检查，失败退避上限60秒；扩展也按其退避周期重连。远端桥不代拉，退出全部宿主后不保证保活；监督恢复不重放浏览器动作。升级后需重载扩展（新增tabGroups权限用于分组）并按客户端方式重连MCP，核对两端实际版本，不能把源码更新当成已加载新版。
+
 1. 查明现有 Node.js 22+ 的绝对路径和仓库绝对路径。
 2. 查接入客户端的官方文档或 `--help`，确认 MCP 配置位置、stdio 格式和生效方式。
 3. 先查已有 `ai-browser-` 条目；主机和端口相同则复用，避免重复接入。

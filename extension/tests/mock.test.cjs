@@ -23,7 +23,7 @@ function backgroundHarness(stored = { cdpEnabled: true, screenshotCdpEnabled: tr
   let diagnosticFetch = async () => ({ ok: true, status: 200, body: { cancel: async () => {} } });
   let timerId = 0;
   const chrome = {
-    storage: { local: {
+    storage: { session: { get: async () => ({}), set: async () => {} }, local: {
       get: async () => stored, set: async (data) => calls.push(['store', data]), remove: async () => {}
     } },
     runtime: {
@@ -35,7 +35,9 @@ function backgroundHarness(stored = { cdpEnabled: true, screenshotCdpEnabled: tr
       create: async (name, config) => calls.push(['alarm', config]), onAlarm: event('alarm')
     },
     tabs: {
-      create: async (params) => { calls.push(['create', params]); return { id: 9, windowId: params.windowId, active: false }; },
+      create: async (params) => { calls.push(['create', params]); const tab = { id: tabs.length + 7, url: params.url, windowId: params.windowId, active: false }; tabs.push(tab); return tab; },
+      group: async ({ tabIds }) => { for (const tab of tabs) if (tabIds.includes(tab.id)) tab.groupId = 2; return 2; },
+      remove: async id => { const index = tabs.findIndex(tab => tab.id === id); if (index >= 0) tabs.splice(index, 1); },
       query: async () => tabs,
       captureVisibleTab: async (windowId) => { calls.push(['capture', windowId]); return 'data:image/png;base64,PNG'; },
       get: async (id) => {
@@ -46,6 +48,7 @@ function backgroundHarness(stored = { cdpEnabled: true, screenshotCdpEnabled: tr
       update: async (id, params) => calls.push(['update', id, params]), onRemoved: event('removed')
     },
     windows: { get: async (id) => ({ id, focused: false }), getLastFocused: async (params) => { calls.push(['lastWindow', params]); return { id: 1 }; } },
+    tabGroups: { update: async () => {} },
     debugger: {
       attach: async (target, version) => calls.push(['attach', target, version]),
       detach: async (target) => { calls.push(['detach', target]); listeners.detach(target); },
@@ -75,6 +78,7 @@ function backgroundHarness(stored = { cdpEnabled: true, screenshotCdpEnabled: tr
       return fetchImpl(...args);
     }
   });
+  context.importScripts = name => vm.runInContext(source(name), context);
   vm.runInContext(source('background.js'), context);
   return {
     calls, listeners, timers,
@@ -182,7 +186,7 @@ test('CDP点击按下失败仍尝试释放，组合键失败仍释放修饰键',
   assert(h.run("qaInput.some(p=>p.type==='keyUp'&&p.key==='Alt'&&p.modifiers===0)"));
 });
 
-test('打开网址强制后台新建，不调用窗口激活，显式窗口继承原页授权校验，无窗口则拒绝', async () => {
+test('打开网址后台创建，不调用窗口激活，显式窗口继承原页授权校验，无窗口则拒绝', async () => {
   const h = backgroundHarness({ disconnected: true });
   await tick();
   const result = await h.run("execute({method:'open',params:{url:'https://example.test/new'}})");
@@ -199,6 +203,50 @@ test('打开网址强制后台新建，不调用窗口激活，显式窗口继�
   await assert.rejects(h.run("execute({method:'open',params:{url:'https://example.test/new'}})"), { code: 'NO_BROWSER_WINDOW' });
   assert.equal(h.calls.filter(c => c[0] === 'create').length, count);
   await assert.rejects(h.run("execute({method:'open',params:{url:'file:///C:/secret'}})"), { code: 'INVALID_ARGUMENTS' });
+});
+
+test('CDP附加失败可在派发前自动降级，显式DOM不更改开关，显式CDP不偷偷降级', async () => {
+  const h = backgroundHarness({ autoAuthorize: true, cdpEnabled: true, disconnected: true });
+  await tick();
+  h.run("chrome.debugger.attach=async()=>{throw new Error('restricted')}");
+  const result = await h.run("execute({method:'click',params:{tabId:7,ref:'r1-1'}})");
+  assert.equal(result.mode, 'dom'); assert.equal(result.fallbackReason, 'CDP_ATTACH_FAILED');
+  assert.equal(h.calls.filter(c => c[0] === 'script' && c[1].args?.[0] === 'domClick').length, 1);
+  assert(!h.calls.some(c => c[0] === 'cdp'));
+  assert.equal(h.run('cdpEnabled'), true);
+  await assert.rejects(h.run("execute({method:'click',params:{tabId:7,ref:'r1-1',mode:'cdp'}})"), /restricted/);
+  await h.run("execute({method:'click',params:{tabId:7,ref:'r1-1',mode:'dom'}})");
+  assert.equal(h.run('cdpEnabled'), true);
+  h.run('cdpEnabled=false');
+  await assert.rejects(h.run("execute({method:'click',params:{tabId:7,ref:'r1-1',mode:'cdp'}})"), { code: 'CDP_DISABLED' });
+});
+
+test('CDP输入派发失败不自动重放DOM动作', async () => {
+  const h = backgroundHarness({ autoAuthorize: true, cdpEnabled: true, disconnected: true });
+  await tick();
+  h.run("chrome.debugger.sendCommand=async(target,method,params)=>{if(params.type==='mousePressed')throw new Error('result unknown');return {}} ");
+  await assert.rejects(h.run("execute({method:'click',params:{tabId:7,ref:'r1-1'}})"), /result unknown/);
+  assert(!h.calls.some(c => c[0] === 'script' && c[1].args?.[0] === 'domClick'));
+});
+
+test('不同标签页批次确实并行，单项失败不丢失其他结果，同页仍受执行保护', async () => {
+  const h = backgroundHarness({ autoAuthorize: true, disconnected: true });
+  await tick();
+  h.run(`wantDisconnect=false;globalThis.qaStarts=[];globalThis.qaResume=[];
+    chrome.tabs.get=async id=>({id,url:'https://example.test/',active:false});
+    const qaScript=chrome.scripting.executeScript;
+    chrome.scripting.executeScript=spec=>spec.args?.[0]==='snapshot'?new Promise((done,reject)=>{
+      qaStarts.push(spec.target.tabId);qaResume.push(()=>spec.target.tabId===7?reject(new Error('fixture error')):done([{result:{title:'other success'}}]));
+    }):qaScript(spec);`);
+  const result = h.run("execute({id:'batch',method:'batch',params:{commands:[{method:'snapshot',params:{tabId:7}},{method:'snapshot',params:{tabId:9}}]}})");
+  await tick();
+  assert.deepEqual(JSON.parse(h.run('JSON.stringify(qaStarts)')), [7, 9]);
+  await assert.rejects(h.run("executeBounded({id:'busy',method:'snapshot',params:{tabId:9}})"), /上一条/);
+  h.run('qaResume.forEach(resume=>resume())');
+  const batch = await result;
+  assert.equal(batch.results[0].ok, false);
+  assert.equal(batch.results[1].ok, true);
+  assert.equal(batch.results[1].result.title, 'other success');
 });
 
 test('后台授权、全部方法、按键映射和撤销', async () => {
@@ -542,7 +590,7 @@ test('页面代理返回 null 或携带 error 时，报告真实原因而非解�
     setTimeout: (fn, ms) => { const id = ++timerId; timers.set(id, { fn, ms }); return id; },
     clearTimeout: (id) => timers.delete(id),
     chrome: {
-      storage: { local: { get: async () => ({}), set: async () => {}, remove: async () => {} } },
+      storage: { session: { get: async () => ({}), set: async () => {} }, local: { get: async () => ({}), set: async () => {}, remove: async () => {} } },
       runtime: { id: 'test', getURL: (p) => `ext://${p}`, getManifest: () => ({ name: 'AI' }),
         onMessage: event, onInstalled: event, onStartup: event },
       alarms: { create: async () => {}, onAlarm: event },
@@ -555,6 +603,7 @@ test('页面代理返回 null 或携带 error 时，报告真实原因而非解�
       } }
     }
   });
+  context.importScripts = name => vm.runInContext(fs.readFileSync(path.join(root, name), 'utf8'), context);
   vm.runInContext(source, context);
   const run = (code) => vm.runInContext(code, context);
   await tick();

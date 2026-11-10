@@ -2,7 +2,7 @@
 
 让支持 MCP 的 AI 助手按标签页读取和操作真实 Edge / Chrome。后台操作不切换标签页、不移动系统鼠标。
 
-当前源码版本：0.11.0。新增指定网址后台打开接口，并修正悬停菜单的光标保持和连续点击衔接；包含此前菜单识别、连接恢复及有界日志。通过仓库更新获取，未创建对应 GitHub Release。
+当前源码版本：0.12.0。新增桥自动恢复、任务标签分组/复用/清理、跨页并行批次与单次DOM/CDP选择，并补齐视觉复查规范。通过仓库更新获取，未创建对应 GitHub Release。
 
 ## 开始使用
 
@@ -11,7 +11,7 @@
 1. 下载或克隆本仓库，放到稳定的目录。
 2. 打开 `edge://extensions`（Chrome 为 `chrome://extensions`），启用开发人员模式，加载仓库内的 `extension` 目录。
 3. 让 AI 按 [AGENT-INTEGRATION.md](AGENT-INTEGRATION.md) 接入自己的 MCP 配置。规范包含通用协议、ZCode 配置和验收步骤，不需要运行注册脚本。
-4. 重启 AI 会话，调用 `browser_status`。本机桥会按需启动，默认端口 17653。
+4. 重启 AI 会话，调用 `browser_status`。本地MCP启动即检查并拉起桥，默认端口17653；存活期间每5秒检查，失败退避至最多60秒，恢复后归零。扩展按自身退避周期接回，不需要额外工具调用。
 5. 在浏览器中点扩展图标连接，授权当前页；也可由用户打开“自动授权所有网页”。
 
 只读验收提示词：
@@ -32,6 +32,8 @@
 关闭输入 CDP 后会解除已有调试附加，DOM 输入失败不会自动启用真实输入协议。截图单独获准时仍可按需附加；仅为截图附加的调试器会在完成后解除。两项都关闭才是本插件完全不调用 CDP 的模式。
 
 这只限制插件调用的用途，浏览器授予的 chrome.debugger 权限不会变成低权限或只读权限。网站可能忽略 DOM 非可信事件，应回读确认；DOM 按键不保证所有站点的默认快捷键都生效。
+
+输入工具支持`mode=auto/dom/cdp`：auto遵守全局开关，CDP附加失败且尚未派发输入时自动降级DOM，同页后续auto沿用DOM；dom可单次解除附加后操作，不改用户开关。cdp仍须用户已开启真实交互。执行阶段失败或结果未知不自动重放，先截图/回读确认。网站出现错误页不能直接归因CDP，也不自动刷新或绕过验证码。新导航后清除该页的自动降级记录。
 
 临时截图授权是浏览器的 activeTab 权限：切换到新站点后可能需要重新点击扩展图标。项目保持原有 HTTP(S) 站点权限，不为截图增加文件页访问权。
 
@@ -63,6 +65,8 @@
 | browser_select / browser_set_checked | 原生select选择、幂等勾选状态 |
 | browser_inspect / browser_wait | 读取元素状态、有条件等待 |
 | browser_fill | 替换文本框或 contenteditable 内容 |
+| browser_task | 查看、保留、整理或结束本任务创建的页面 |
+| browser_batch | 最多4个不同页面的独立操作并行，截图以原生图片返回 |
 | browser_press | 在目标标签页发送支持的按键 |
 | browser_navigate | 导航到明确的 HTTP(S) 地址 |
 | browser_screenshot | 按独立截图开关选择 CDP 或当前页截图 |
@@ -75,7 +79,23 @@
 
 0.10.1把tabindex控件，以及由aria-haspopup+controls/owns关联或具备menu/listbox角色的可见弹层内列表项、自绘指针项纳入定位。快照标记inPopup并优先保留这些选项；没有标准role的选项仍按真实角色返回，不虚构menuitem。inspect触发器可见关联popups状态和候选项数。此为DOM候选识别，不等于所有列表项都必然绑定了点击处理器。
 
-0.11.0共18个工具。AI要新开用户指定网址时用browser_open(url)，可选已有授权tabId确定所属窗口；不传则用最近普通窗口。创建固定active=false，不调用窗口激活或新建窗口；没有窗口则报错，需用户手动打开。回执包含新tabId、实际active、窗口focus前后状态和授权状态，后续按新tabId读取；自动授权关闭时不擅自授权新页。browser_navigate仍用于已有页。网页按钮自行window.open或用户手动新建页面不由此接口改写。
+0.12.0共20个工具。AI要新开网址时用browser_open(url,taskId,taskName)，可选已有授权tabId确定所属窗口；不传则用最近普通窗口。创建固定active=false，不调用窗口激活或新建窗口；没有窗口则报错。回执包含tabId、reused、taskId/groupId、active、窗口focus前后状态和授权状态；自动授权关闭时不擅自授权新页。browser_navigate仍用于用户指定的已有页。网页按钮自行window.open或用户手动新建页面不由此接口改写。
+
+### 任务页面与多页工作
+
+每项工作使用唯一taskId和简短taskName，任务名显示在浏览器标签组。默认只复用本任务、同窗口、完整URL相同的插件页面；显式reuseKey可导航复用同源同类页，reuse=false用于需要并排保留的对照页。不会默认复用或清理用户原有页面。新增tabGroups权限仅用于这些任务组。
+
+taskId和taskName为open必填参数；升级后客户端必须重连读取新目录，旧open(url)定义不可继续使用。
+
+归属记录使用storage.session，worker重启可恢复，浏览器会话结束后清空；用户移出原分组的页面交还用户。每任务达到12页先整理重复可回收页，仍有12个独立/受保护页则返回TASK_TAB_LIMIT。旧版页面没有可靠归属，不自动追认或批量销毁。
+
+agent在任务完成时调用browser_task(action=finish)，交付页通过keepTabIds保留；cleanup只合并重复页。活动、固定、有声、执行中、keep、插件修改或表单状态不安全/无法核验的页会跳过，并返回具体原因。任务结束由agent显式通知，插件不凭空闲超时猜测；这需要随仓库分发的技能配合，通用MCP协议本身不提供聊天名称和任务结束事件。
+
+browser_batch一次最多4个不同tabId，支持快照、截图及交互，返回逐项结果；同页依赖步骤继续顺序执行，批次不是事务，失败不重放业务操作。遇到DOM歧义、遮挡或状态冲突时，技能要求先截图/inspect复查，再判断是否确实需要用户处理。详见[任务、并行与验收](skills/ai-browser-control/references/tasks-and-verification.md)。
+
+### 桥自动恢复
+
+本地MCP监督桥的可达性；启动预热、定期检查和工具调用共用单进程启动门禁。不同MCP共享同一端口的健康桥，启动竞争时只有一个进程可监听。远端桥不会被本机代启动，也不创建Windows服务、计划任务或Node副本。MCP退出后停止监督，共享桥不被连带关闭；所有宿主均退出时不承诺继续保活。监督只恢复传输，绝不重放已派发的浏览器命令。
 
 当前范围：主文档普通 DOM、同源 iframe 正文；跨域 iframe、封闭 Shadow DOM、canvas 内部控件和系统文件选择框不支持。动态页面内容尚未出现时稍后重新读取，不把短文档当成错误。
 
@@ -130,6 +150,8 @@ node install.mjs bridge token <端口>
 
 诊断日志位于 `%USERPROFILE%\.zcode\ai-browser-control\<端口>\bridge.log`，新记录为逐行 JSON；升级保留的旧日志尾部仍为旧格式。当前文件和 `.1`、`.2` 两份历史每份最多1 MiB，单桥合计最多3 MiB；超限自动轮转，启动时也会裁剪旧版超大日志。轮转失败会跳过写入，不回退到无限追加。桥的后台启动入口不再把 stdout 长期重定向到日志，以免绕过大小限制。
 
+同目录supervisor.log记录MCP监督失败与恢复，固定单份最多1 MiB，不按进程PID增加文件。多个MCP的监督诊断共享该有界文件，竞争写入失败允许跳过；以桥启动日志和实际状态交叉核对。
+
 日志记录配对/断开、轮询、重试间隔、命令排队/派发/结果/超时，以及扩展的授权查询、脚本注入、prepare、DOM/CDP执行等阶段和耗时。用桥记录的 `id` 与 `extension_event.diagnostic.commandId` 关联；扩展事件另带 `session`、`seq`、`epoch` 和版本，以区分后台重启、重连和补传。桥接收时间在外层 `time`，扩展原事件时间为内层毫秒时间戳。不记录页面URL、标题、正文、截图、输入值、token或原始错误正文；只保留固定错误类别和HTTP状态码。
 
 扩展在 `chrome.storage.local.diagnosticLog` 中保留最近最多128条且少于64 KiB的元数据，200毫秒合并存储，最多一个存储请求在途；桥恢复后自动分批补传。补传不阻塞命令通道。worker重启可能重传已有事件，按session+seq识别重复；旧记录会被新记录覆盖，日志不是无限期审计。完全冻结worker或浏览器存储故障时无法保证持久化。
@@ -168,10 +190,11 @@ node test-page/serve.mjs
 自动化回归：
 
 ```powershell
-node --test tests/bridge.test.mjs tests/install.test.mjs tests/diagnostics.test.mjs tests/protocol.test.mjs extension/tests/mock.test.cjs extension/tests/expired-result.test.cjs
+node --test tests/bridge.test.mjs tests/install.test.mjs tests/diagnostics.test.mjs tests/protocol.test.mjs tests/supervisor.test.mjs extension/tests/mock.test.cjs extension/tests/expired-result.test.cjs extension/tests/tasks.test.cjs
 python -X utf8 tests/browser-ui.py
 python -X utf8 tests/browser-extension.py
 python -X utf8 tests/browser-loading.py
+python -X utf8 tests/browser-lifecycle.py
 ```
 
 Python 项仅供开发验收，依赖测试机已有 Python Playwright、Pillow 和 Edge；不属于运行时依赖，不自动安装或复制全局工具。UI 对照测试还需要 Git 历史中的基线提交（见 REQUIREMENTS.md）；纯 ZIP 没有该历史时无法生成旧版对照。它们使用独立临时浏览器配置和测试桥，不控制用户的标签页。证据输出到 `temp/qa/`。无 CDP 截图正向夹具的额外权限与正式清单不同，具体限制在测试记录中明确列出。
@@ -186,8 +209,8 @@ Python 项仅供开发验收，依赖测试机已有 Python Playwright、Pillow 
 
 主要入口：
 
-- `server/mcp.mjs`：MCP stdio；`server/protocol.mjs`：18个工具与共用参数校验；`server/bridge.mjs`：指令队列、来源校验、远程 token。
-- `extension/background.js`：授权、CDP/DOM 路由、结果重传。
+- `server/mcp.mjs`：MCP stdio；`server/supervisor.mjs`：本地桥监督；`server/protocol.mjs`：20个工具与共用参数校验；`server/bridge.mjs`：指令队列、来源校验、远程 token。
+- `extension/background.js`：授权、CDP/DOM 路由、跨页批次、结果重传；`extension/tasks.js`：会话级任务页面归属、复用与清理。
 - `extension/page-agent.js`：DOM 快照、ref、定位与 DOM 操作；`extension/cursor.js`：光标与动效。
 - `extension/popup.*`：弹窗；`install.mjs`：桥管理、更新及旧注册兼容。
 

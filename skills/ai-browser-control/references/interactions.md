@@ -31,6 +31,8 @@
 
 “CDP真实交互”沿用已有cdpEnabled设置，默认关闭；agent不得自动开启。DOM悬停派发pointer/mouse enter、over、move及离开事件，适合JavaScript菜单；不设置CSS :hover，不产生可信事件。蓝色光标只是反馈。CSS hover或拒绝非可信事件的网站需用户开启CDP后再测，截图CDP授权不能代替交互CDP授权。
 
+0.12.0支持click/hover/drag/set_checked/fill/press的mode=auto/dom/cdp。auto仅在附加失败且未派发输入时自动降级DOM；执行阶段失败不重放。网站对CDP的限制需要现场证据，不能从单一异常推断；可用mode=dom解除附加后执行已确认尚未发生的动作。遮挡、同名目标或状态矛盾先截图再决定是否向用户求助，具体边界见[任务与验收](tasks-and-verification.md)。
+
 不支持浏览器原生右键菜单、系统文件选择、跨域iframe内部控件、canvas内部目标与系统拖放。页面自绘菜单可snapshot读取。原生菜单出现后不要把DOM读取不到误当菜单未打开，也不要擅自换桌面控制。
 
 错误包含结构化code，例如STALE_REF、TARGET_CHANGED、ELEMENT_DISABLED、ELEMENT_OBSCURED、TARGET_OUTSIDE_VIEWPORT、COMMAND_TIMEOUT、INVALID_ARGUMENTS；不能从单一错误码推断网站全部不可操作。长按/拖拽/修饰键有释放清理，已发给浏览器的动作仍不能保证取消。

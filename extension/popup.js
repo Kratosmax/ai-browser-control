@@ -86,7 +86,7 @@ function refresh() {
     autoAuthorize.checked = state.autoAuthorize === true;
     cdpEnabled.checked = state.cdpEnabled === true;
     screenshotCdp.checked = state.screenshotCdpEnabled !== false;
-    modeDescription.textContent = state.cdpEnabled === true ? '使用浏览器真实输入协议' : '使用 DOM 操作';
+    modeDescription.textContent = state.cdpEnabled === true ? '优先 CDP，允许按页使用 DOM' : '使用 DOM 操作';
     screenshotDescription.textContent = state.screenshotCdpEnabled !== false ? '后台截图，按需临时附加' : '仅当前选中页，需临时授权';
     if (!dirty.has(bridgePortInput)) bridgePortInput.value = state.bridgePort;
     if (!dirty.has(cursorHideInput)) cursorHideInput.value = state.cursorHideSec;
@@ -171,7 +171,7 @@ cdpEnabled.addEventListener('change', () => {
   void act(async () => {
     const state = await send('set_cdp_enabled', { enabled: cdpEnabled.checked });
     message.textContent = state.cdpEnabled
-      ? '点击与输入改用 CDP，可能显示调试提示条；截图设置独立。'
+      ? '优先使用 CDP，附加失败可安全回退 DOM；截图设置独立。'
       : '点击与输入改用 DOM；截图设置独立，部分网站可能忽略模拟输入。';
   });
 });

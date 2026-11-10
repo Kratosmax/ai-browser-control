@@ -33,6 +33,17 @@ test('日志轮转遇到文件故障时不破坏命令链，也不回退无限�
   assert(fs.statSync(path.join(dir, 'bridge.log')).size <= 100);
 });
 
+test('监督日志固定文件单份有界，重复创建logger不按PID累积文件', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'browser-supervisor-log-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  for (let session = 0; session < 10; session++) {
+    const log = createLogger(dir, { maxBytes: 300, backups: 0, filename: 'supervisor.log' });
+    for (let failures = 0; failures < 20; failures++) log('supervisor_failed', { failures });
+  }
+  assert.deepEqual(fs.readdirSync(dir), ['supervisor.log']);
+  assert(fs.statSync(path.join(dir, 'supervisor.log')).size <= 300);
+});
+
 test('扩展诊断须配对、有批次大小限制，落盘只保留固定元数据并显示真实版本', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'browser-telemetry-'));
   const bridge = createBridge({ port: 0, configDir: dir, pollTimeout: 20 });
