@@ -15,6 +15,8 @@ const autoAuthorize = document.getElementById('auto-authorize');
 const cdpEnabled = document.getElementById('cdp-enabled');
 const screenshotCdp = document.getElementById('screenshot-cdp');
 const screenshotDescription = document.getElementById('screenshot-description');
+const lifecycleWake = document.getElementById('lifecycle-wake');
+const lifecycleWakeDescription = document.getElementById('lifecycle-wake-description');
 const bridgePortInput = document.getElementById('bridge-port');
 const savePortButton = document.getElementById('save-port');
 const cursorHideInput = document.getElementById('cursor-hide');
@@ -86,8 +88,10 @@ function refresh() {
     autoAuthorize.checked = state.autoAuthorize === true;
     cdpEnabled.checked = state.cdpEnabled === true;
     screenshotCdp.checked = state.screenshotCdpEnabled !== false;
+    lifecycleWake.checked = state.lifecycleWakeEnabled === true;
     modeDescription.textContent = state.cdpEnabled === true ? '优先 CDP，允许按页使用 DOM' : '使用 DOM 操作';
     screenshotDescription.textContent = state.screenshotCdpEnabled !== false ? '后台截图，按需临时附加' : '仅当前选中页，需临时授权';
+    lifecycleWakeDescription.textContent = state.lifecycleWakeEnabled === true ? '冻结时临时唤醒，继续 DOM 读取' : '默认关闭，冻结的页面暂停读取';
     if (!dirty.has(bridgePortInput)) bridgePortInput.value = state.bridgePort;
     if (!dirty.has(cursorHideInput)) cursorHideInput.value = state.cursorHideSec;
     if (!dirty.has(cursorTrailInput)) cursorTrailInput.value = state.cursorTrailSec;
@@ -98,6 +102,7 @@ function refresh() {
     autoAuthorize.disabled = busy;
     cdpEnabled.disabled = busy;
     screenshotCdp.disabled = busy;
+    lifecycleWake.disabled = busy;
     bridgePortInput.disabled = busy;
     cursorHideInput.disabled = busy;
     cursorTrailInput.disabled = busy;
@@ -182,6 +187,15 @@ screenshotCdp.addEventListener('change', () => {
     message.textContent = state.screenshotCdpEnabled
       ? '已允许截图单独使用 CDP；仅为截图附加的调试器完成后会解除。'
       : '已关闭截图 CDP；仅能截取窗口当前选中的网页。';
+  });
+});
+
+lifecycleWake.addEventListener('change', () => {
+  void act(async () => {
+    const state = await send('set_lifecycle_wake_enabled', { enabled: lifecycleWake.checked });
+    message.textContent = state.lifecycleWakeEnabled
+      ? '已开启后台唤醒：冻结的页面临时唤醒继续读取，不会切换页面。'
+      : '已关闭后台唤醒：冻结的页面暂停读取。';
   });
 });
 

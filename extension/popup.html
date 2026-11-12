@@ -32,11 +32,13 @@
     <label class="switch-row" for="auto-authorize"><span class="switch-copy"><strong>自动授权所有网页</strong><small>关闭后，逐页授权</small></span><input id="auto-authorize" class="switch" type="checkbox" role="switch"></label>
     <label class="switch-row" for="cdp-enabled"><span class="switch-copy"><strong>CDP 真实交互</strong><small id="mode-description">默认关闭，使用 DOM 操作</small></span><input id="cdp-enabled" class="switch" type="checkbox" role="switch"></label>
     <label class="switch-row" for="screenshot-cdp"><span class="switch-copy"><strong>允许截图使用 CDP</strong><small id="screenshot-description">后台截图，按需临时附加</small></span><input id="screenshot-cdp" class="switch" type="checkbox" role="switch"></label>
+    <label class="switch-row" for="lifecycle-wake"><span class="switch-copy"><strong>后台唤醒冻结页</strong><small id="lifecycle-wake-description">默认关闭，冻结时临时唤醒，继续 DOM 读取</small></span><input id="lifecycle-wake" class="switch" type="checkbox" role="switch"></label>
   </section>
   <details id="advanced">
     <summary>更多设置<span aria-hidden="true">⌄</span></summary>
     <div class="settings-content">
       <p class="hint">截图也使用浏览器调试权限；仅为截图临时附加的调试器，会在完成后解除。</p>
+      <p class="hint">后台唤醒冻结页使用独立 CDP 权限，与 CDP 交互、截图开关互不影响；唤醒只为继续读取，不会切换页面。</p>
       <label class="field-label" for="cursor-hide">光标停留时间 <span class="secondary">秒</span></label>
       <div class="actions"><input id="cursor-hide" type="number" min="0" max="60" step="1" required aria-describedby="hide-hint"><button id="save-hide" type="button" class="secondary-button">保存</button></div>
       <p id="hide-hint" class="hint">默认 10 秒；0 为操作后立即隐藏</p>

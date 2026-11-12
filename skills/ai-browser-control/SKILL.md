@@ -38,11 +38,11 @@ description: 通过本插件 MCP 按标签页读取和操作真实 Edge/Chrome�
 
 悬停、右键、双击、长按、拖拽、焦点组合键、分裂按钮、原生选择或勾选，以及“事件成功但菜单没展开”等情况，先读[特殊交互与状态](references/interactions.md)。使用hover/focus/drag/select/set_checked/inspect/wait及click扩展参数，不把点击派发当作菜单已打开。
 
-- 读取通过隔离脚本完成，不附加调试器；已附加的调试器是否存在取决于此前操作。读取方式不能保证所有网站都不识别或拦截扩展。
+- DOM读取通过隔离脚本完成，默认不附加调试器。用户已允许独立的“后台唤醒冻结页”用途：仅该开关开启、原生frozen=true、无旧挂起operation时，新snapshot/inspect/wait可临时使用CDP唤醒一次，核对原生状态与目标身份并清理本次附加后再读取；不切页、不刷新、不重放，不因此开启CDP输入。正常页不附加；失败按实际回执停止相关步骤。读取方式不能保证所有网站都不识别或拦截扩展。
 - “CDP 真实交互”（原“CDP 点击与输入”）默认关闭，使用 DOM。开启后auto优先CDP；附加失败且尚未派发输入时自动降级DOM，回执包含fallbackReason。同一页后续auto使用DOM。单次mode=dom可解除附加后用DOM，不改全局开关；mode=cdp仍受用户开关限制。不能把网站视觉异常直接当成“CDP拦截”，先截图/回读确认；输入执行阶段失败或结果未知不自动重放。DOM失败不自动开启CDP。原生select和页面焦点操作始终使用DOM语义接口。
 - “允许截图使用 CDP”独立设置，默认允许，支持未选中的后台页；仅为截图临时附加的调试器完成后解除。它只限定插件用途，不代表 chrome.debugger 变为只读或低权限。
 - 只有关闭独立截图 CDP 后，截图才限于窗口当前选中 HTTP(S) 页，并需要用户点击扩展图标取得 activeTab 临时权限。不得为了截图切换标签页。
-- 用 browser_list_tabs 的 inputMode/screenshotMode 核对当前实际模式；两个开关都关闭才是完全不用 CDP 的模式。
+- 用browser_list_tabs的inputMode/screenshotMode/lifecycleWakeEnabled核对当前实际模式；输入、截图和后台唤醒三个用途都关闭才是完全不用CDP的模式。后台唤醒开关默认关闭且由用户控制，agent不能用普通工具参数开启；已授权的读取正常调用即可，不先要求用户手动切页，也不自行反复重试唤醒。
 - 可视光标仅是操作反馈，不移动系统鼠标；默认最后一次操作 10 秒后淡出。隐藏页面不等待装饰动画。
 
 ## 范围

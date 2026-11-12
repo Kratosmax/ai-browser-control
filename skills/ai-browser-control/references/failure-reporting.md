@@ -22,7 +22,7 @@
 
 TAB_FROZEN/TAB_DISCARDED且outcome=not-dispatched说明浏览器已报告该页冻结或丢弃，本次未进入页面方法；这是页面生命周期缺口，不等于MCP或整个DOM通道失效。立即说明该页待恢复、保留进度；其它不依赖该页且已授权的工作可继续，不为已知冻结每次都发起新一轮插件维护。没有现成且已授权的恢复入口时说明需要用户唤醒；不自动切页、刷新、重建页面、改休眠设置或用截图授权代替CDP唤醒权限。页面唤醒后先用已有/必要的一次list_tabs核对frozen=false及旧operation已结束，再重新读取并定位；不能重放未知结果的写入。
 
-若outcome=unverified，可能已有较早步骤执行；若operation仍在或出现COMMAND_TIMEOUT，保留未知结果与原命令编号，按下方超时交接处理，不能降格为“未派发”。缺少frozen字段保持未知。已知冻结的新请求在0.16.3起应立即返回，若仍进入注入并超时，按实际错误交接。
+若outcome=unverified，可能已有较早步骤执行；若operation仍在或出现COMMAND_TIMEOUT，保留未知结果与原命令编号，按下方超时交接处理，不能降格为“未派发”。缺少frozen字段保持未知。未开启独立后台唤醒时，已知冻结的新请求在0.16.3起应立即返回；0.17.0且lifecycleWakeEnabled=true时，新的snapshot/inspect/wait可先进行一次有界唤醒，成功才继续DOM读取。PAGE_WAKE_FAILED/PAGE_WAKE_TIMEOUT表示本次唤醒未完成，保留命令编号、stage=wake和phase，不重放；即使wakeVerified=true，也不能把页面读取失败或业务未完成说成成功。原生API挂起仍按COMMAND_TIMEOUT/旧operation交接。
 
 ## 超时与忙碌证据
 

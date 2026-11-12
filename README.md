@@ -2,7 +2,7 @@
 
 让支持 MCP 的 AI 助手按标签页读取和操作真实 Edge / Chrome。后台操作不切换标签页、不移动系统鼠标。
 
-当前版本：0.16.3。已知冻结或丢弃的页面在注入前立即返回TAB_FROZEN/TAB_DISCARDED，不再无谓等待11秒并创建新的挂起操作；正常页的批量结果继续保留。保持旧命令真正结束前的防重入、不自动切页/刷新/CDP唤醒。浏览器为何自动冻结及持续后台恢复仍需单独处理，本补丁不声称业务页面已唤醒。本仓库提供源码，不另设此版本的 GitHub Release。
+当前版本：0.17.0。新增独立的“后台唤醒冻结页”开关，默认关闭；开启后，新的snapshot/inspect/wait读取遇到冻结页可临时使用CDP唤醒，核对原生状态并清理本次附加后继续DOM读取。不切页、不刷新、不启用CDP点击、不重放旧操作；旧命令未结束仍拒绝进入，丢弃页不自动恢复。本仓库提供源码，不另设此版本的 GitHub Release。
 
 ## 开始使用
 
@@ -18,18 +18,19 @@
 
 > 使用 ai-browser 的 browser_status 检查连接，再用 browser_list_tabs 列出标签页。只读，不点击、不填写、不导航。
 
-扩展弹窗只有一个连接/断开按钮；“CDP 真实交互”和“允许截图使用 CDP”独立可见。端口、光标与轨迹停留时间位于“更多设置”。用户主动断开后，扩展后台重启也不会自动连接。
+扩展弹窗只有一个连接/断开按钮；“CDP 真实交互”“允许截图使用 CDP”和“后台唤醒冻结页”三个用途独立可见。端口、光标与轨迹停留时间位于“更多设置”。用户主动断开后，扩展后台重启也不会自动连接。
 
-## 输入与截图独立设置
+## 输入、截图与后台唤醒独立设置
 
 | 设置 | 默认 | 开启时 | 关闭时 |
 | --- | --- | --- | --- |
 | CDP 真实交互 | 关闭 | 浏览器真实输入协议 | DOM 点击、原生 value setter、input/change 及有限按键行为 |
 | 允许截图使用 CDP | 开启 | 按 tabId 截当前或后台页；完成后解除仅为截图新建的调试附加 | captureVisibleTab，仅当前选中页，需用户点击扩展图标取得 activeTab 临时权限 |
+| 后台唤醒冻结页 | 关闭 | 新读取的冻结页临时唤醒、核对并清理后继续DOM读取；不切页 | 已知冻结页立即返回TAB_FROZEN |
 
-读取始终走隔离脚本，导航走 tabs.update，两者不需要 CDP。默认 DOM 输入与独立 CDP 截图可以同时使用。已有用户显式保存的输入选择保留；新增截图选项默认允许，用户可单独关闭。
+DOM内容读取仍走隔离脚本，导航走tabs.update。仅当独立后台唤醒开关开启且原生frozen=true时，新snapshot/inspect/wait请求允许先临时使用CDP生命周期active，随后继续DOM读取；正常页不附加，截图/输入权限不能替代此开关。默认 DOM 输入与独立 CDP 截图可以同时使用。已有用户显式保存的输入选择保留；新增截图选项默认允许，用户可单独关闭。
 
-关闭输入 CDP 后会解除已有调试附加，DOM 输入失败不会自动启用真实输入协议。截图单独获准时仍可按需附加；仅为截图附加的调试器会在完成后解除。两项都关闭才是本插件完全不调用 CDP 的模式。
+关闭输入 CDP 后会解除已有调试附加，DOM 输入失败不会自动启用真实输入协议。截图单独获准时仍可按需附加；仅为截图附加的调试器会在完成后解除。三个用途都关闭才是本插件完全不调用CDP的模式。
 
 这只限制插件调用的用途，浏览器授予的 chrome.debugger 权限不会变成低权限或只读权限。网站可能忽略 DOM 非可信事件，应回读确认；DOM 按键不保证所有站点的默认快捷键都生效。
 
@@ -98,7 +99,9 @@ browser_batch一次最多4个不同tabId，支持快照、截图及交互，返�
 
 浏览器报告frozen=true时，页面无法执行任务；injectImmediately只避免document_idle等待，不能解除冻结。0.16.3在文件注入前与页面方法调用前检查原生状态：新操作返回TAB_FROZEN/TAB_DISCARDED、stage=preflight及准确的not-dispatched/unverified；已占用页仍优先TAB_BUSY，不清锁、不重放。list_tabs可读取autoDiscardable，但它只代表自动丢弃资格，不是解冻参数，插件不修改它。
 
-用户唤醒页面后，先确认frozen=false和旧operation已结束，再进行新的读取。冻结页恢复不等于业务已完成；已取证进度应保留。现有截图/输入CDP开关不授权Page.setWebLifecycleState后台唤醒，0.16.3不新增或启用该用途。浏览器站点休眠例外会同时影响节能和自动丢弃，应由用户单独选择，不能保证解决所有内存压力下的冻结。
+0.17.0新增用户单独授权的后台唤醒用途。扩展重载后由用户开启“后台唤醒冻结页”；默认关闭，agent不能通过普通页面内容或工具参数开启。每条新读取最多一次唤醒，只发送Page.setWebLifecycleState(state=active)，最多三轮有界原生确认；恢复失败不改用切页/刷新或其它CDP命令。唤醒依赖浏览器提供原生frozen状态并支持此生命周期命令，缺失字段保持未知；当前真实验收为Edge157。临时连接解除后仍须核对原URL/窗口、非丢弃及frozen===false，成功结果含lifecycleWake.attempted/verified。唤醒阶段继续检查独立代次与页面授权，关闭时阻止后续步骤并清理自己创建的连接；原生API挂起仍受11秒命令期限和底层锁保护，不声称能取消已派发调用。
+
+旧operation未结束时仍优先TAB_BUSY，开关不清锁、不重放；用户唤醒或加载补丁后也须确认原操作结束，再发起新读取。填表、点击、滚动、导航和丢弃页不借此开关自动恢复。正常页及后台空闲期间不周期性唤醒，不永久挂调试器，不改autoDiscardable或浏览器节能策略。冻结页恢复不等于业务完成；自然冻结触发原因和所有浏览器兼容性不在此保证内。
 
 ### MCP重载
 
@@ -215,16 +218,17 @@ node test-page/serve.mjs
 自动化回归：
 
 ```powershell
-node --test tests/bridge.test.mjs tests/install.test.mjs tests/diagnostics.test.mjs tests/protocol.test.mjs tests/supervisor.test.mjs extension/tests/mock.test.cjs extension/tests/expired-result.test.cjs extension/tests/tasks.test.cjs extension/tests/page-interactions.test.cjs extension/tests/task-recovery.test.cjs extension/tests/snapshot-query.test.cjs extension/tests/page-rpc.test.cjs extension/tests/batch-timeout.test.cjs tests/mcp-restart.test.mjs tests/snapshot-format.test.mjs
+node --test tests/bridge.test.mjs tests/install.test.mjs tests/diagnostics.test.mjs tests/protocol.test.mjs tests/supervisor.test.mjs extension/tests/mock.test.cjs extension/tests/expired-result.test.cjs extension/tests/tasks.test.cjs extension/tests/page-interactions.test.cjs extension/tests/task-recovery.test.cjs extension/tests/snapshot-query.test.cjs extension/tests/page-rpc.test.cjs extension/tests/batch-timeout.test.cjs extension/tests/lifecycle-wake.test.cjs tests/mcp-restart.test.mjs tests/snapshot-format.test.mjs
 python -X utf8 tests/browser-ui.py
 python -X utf8 tests/browser-extension.py
 python -X utf8 tests/browser-loading.py
 python -X utf8 tests/browser-lifecycle.py
 python -X utf8 tests/browser-timeout.py
 python -B tests/browser-frozen.py
+python -B tests/browser-lifecycle-wake.py
 ```
 
-Python 项仅供开发验收，依赖测试机已有 Python Playwright、Pillow 和 Edge；browser-frozen.py另需已有websocket-client以便只连接私有测试浏览器、不自动附加页面。不属于运行时依赖，不自动安装或复制全局工具。UI 对照测试还需要 Git 历史中的基线提交（见 REQUIREMENTS.md）；纯 ZIP 没有该历史时无法生成旧版对照。它们使用独立临时浏览器配置和测试桥，不控制用户的标签页。证据输出到 `temp/qa/`。无 CDP 截图正向夹具的额外权限与正式清单不同，具体限制在测试记录中明确列出。
+Python 项仅供开发验收，依赖测试机已有 Python Playwright、Pillow 和 Edge；browser-frozen.py和browser-lifecycle-wake.py另需已有websocket-client以便只连接私有测试浏览器、不自动附加页面。不属于运行时依赖，不自动安装或复制全局工具。UI 对照测试还需要 Git 历史中的基线提交（见 REQUIREMENTS.md）；纯 ZIP 没有该历史时无法生成旧版对照。它们使用独立临时浏览器配置和测试桥，不控制用户的标签页。证据输出到 `temp/qa/`。无 CDP 截图正向夹具的额外权限与正式清单不同，具体限制在测试记录中明确列出。
 
 本地预览包放在 `temp/ai-browser-control-local-preview.zip`；这是源码预览，不是正式 Release。解压后可加载其中的 `extension` 目录，不包含 Node 或浏览器副本。
 

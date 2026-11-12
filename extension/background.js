@@ -3,12 +3,13 @@ importScripts('tasks.js');
 
 const ALARM = 'zcode-bridge-wakeup';
 const authorized = new Set();
-// 已附加调试器的标签页：只有写入类命令（点击/输入/截屏）需要，读取不附加——无提示条、无 CDP 痕迹。
+// 输入、截图与生命周期唤醒独立授权；普通DOM读取不附加，冻结页仅按独立开关临时唤醒。
 const attached = new Set();
 const revoked = new Set();
 const revocationTouched = new Set();
 let revocationSaving = Promise.resolve();
-const cdpGeneration = { input: 0, screenshot: 0 };
+const cdpGeneration = { input: 0, screenshot: 0, lifecycle: 0 };
+const lifecycleAttachments = new Set();
 const detaching = new Set();
 const tabQueues = new Map();
 const completed = new Map();
@@ -16,6 +17,8 @@ let autoAuthorize = false;
 // 输入默认使用 DOM；截图的 CDP 用途独立授权，不代表浏览器调试权限被降级。
 let cdpEnabled = false;
 let screenshotCdpEnabled = true;
+// 独立用途，默认关闭；截图或点击授权不能开启生命周期唤醒。
+let lifecycleWakeEnabled = false;
 // 光标消失延时（毫秒）：由弹窗配置（0-60 秒），随每次写入命令下发到页面代理。
 let cursorHideMs = 10000;
 let cursorTrailMs = 5000;
@@ -79,9 +82,9 @@ let diagnosticTimer = null;
 let diagnosticSending = null;
 let diagnosticSaving = false;
 
-const PAGE_RESULT_ERROR_CODES = new Set(["PAGE_AGENT_EMPTY_RESULT","PAGE_AGENT_NO_RESULT","PAGE_AGENT_INVALID_RESULT","PAGE_AGENT_API_ERROR","PAGE_AGENT_NOT_READY","PAGE_AGENT_METHOD_MISSING","PAGE_AGENT_SYNC_THROW","PAGE_AGENT_PROMISE_REJECTED","PAGE_AGENT_SERIALIZE_FAILED","PAGE_AGENT_DOCUMENT_CHANGED","PAGE_AGENT_FRAME_MISMATCH","PAGE_AGENT_INVALID_OPERATION","PAGE_AGENT_COMMAND_EXPIRED","TAB_FROZEN","TAB_DISCARDED","PAGE_ACTION_FAILED","INVALID_PARAMS","INVALID_ARGUMENTS","STALE_REF","REF_EXPIRED","STALE_CURSOR","SNAPSHOT_CHANGED","ELEMENT_NOT_VISIBLE","TARGET_CHANGED","ELEMENT_DISABLED","AMBIGUOUS_TARGET","TARGET_OUTSIDE_VIEWPORT","ELEMENT_OBSCURED","UNSUPPORTED_TARGET","UNSUPPORTED_ACTION"]);
+const PAGE_RESULT_ERROR_CODES = new Set(["PAGE_AGENT_EMPTY_RESULT","PAGE_AGENT_NO_RESULT","PAGE_AGENT_INVALID_RESULT","PAGE_AGENT_API_ERROR","PAGE_AGENT_NOT_READY","PAGE_AGENT_METHOD_MISSING","PAGE_AGENT_SYNC_THROW","PAGE_AGENT_PROMISE_REJECTED","PAGE_AGENT_SERIALIZE_FAILED","PAGE_AGENT_DOCUMENT_CHANGED","PAGE_AGENT_FRAME_MISMATCH","PAGE_AGENT_INVALID_OPERATION","PAGE_AGENT_COMMAND_EXPIRED","TAB_FROZEN","TAB_DISCARDED","PAGE_WAKE_FAILED","PAGE_WAKE_TIMEOUT","CDP_DISABLED","PAGE_ACTION_FAILED","INVALID_PARAMS","INVALID_ARGUMENTS","STALE_REF","REF_EXPIRED","STALE_CURSOR","SNAPSHOT_CHANGED","ELEMENT_NOT_VISIBLE","TARGET_CHANGED","ELEMENT_DISABLED","AMBIGUOUS_TARGET","TARGET_OUTSIDE_VIEWPORT","ELEMENT_OBSCURED","UNSUPPORTED_TARGET","UNSUPPORTED_ACTION"]);
 
-const COMMAND_PHASES = new Set(['queue', 'tabs.get', 'tabs.query', 'tabs.update', 'tabs.create', 'windows.get', 'windows.getLastFocused', 'tabs.captureVisibleTab', 'debugger.attach', 'debugger.detach', 'scripting.inject', 'snapshot', 'scroll', 'inspect', 'prepare', 'focus', 'focusTarget', 'showCursor', 'cursorPulse', 'hideCursor', 'domClick', 'domFill', 'domPress', 'domHover', 'holdHover', 'pointerClick', 'domDrag', 'select', 'waitFor', 'Input.dispatchMouseEvent', 'Input.dispatchKeyEvent', 'Input.insertText', 'Page.captureScreenshot']);
+const COMMAND_PHASES = new Set(['queue', 'tabs.get', 'tabs.query', 'tabs.update', 'tabs.create', 'windows.get', 'windows.getLastFocused', 'tabs.captureVisibleTab', 'debugger.attach', 'debugger.detach', 'scripting.inject', 'snapshot', 'scroll', 'inspect', 'prepare', 'focus', 'focusTarget', 'showCursor', 'cursorPulse', 'hideCursor', 'domClick', 'domFill', 'domPress', 'domHover', 'holdHover', 'pointerClick', 'domDrag', 'select', 'waitFor', 'Input.dispatchMouseEvent', 'Input.dispatchKeyEvent', 'Input.insertText', 'Page.captureScreenshot', 'Page.setWebLifecycleState']);
 
 // 固定白名单也用于工具错误回执；绝不携带页面内容或原始异常正文。
 function pageResultDiagnostic(value) {
@@ -90,10 +93,10 @@ function pageResultDiagnostic(value) {
   for (const key of ['resultCount', 'frameId', 'durationMs']) {
     if (Number.isSafeInteger(value[key]) && value[key] >= 0) out[key] = value[key];
   }
-  for (const key of ['agentPresent', 'documentChanged', 'frozen', 'discarded']) if (typeof value[key] === 'boolean') out[key] = value[key];
+  for (const key of ['agentPresent', 'documentChanged', 'frozen', 'discarded', 'wakeAttempted', 'wakeVerified']) if (typeof value[key] === 'boolean') out[key] = value[key];
   if (['loading', 'complete'].includes(value.tabStatus)) out.tabStatus = value.tabStatus;
   if (COMMAND_PHASES.has(value.phase)) out.phase = value.phase;
-  if (['preflight', 'inject', 'invoke', 'decode', 'serialize'].includes(value.stage)) out.stage = value.stage;
+  if (['preflight', 'wake', 'inject', 'invoke', 'decode', 'serialize'].includes(value.stage)) out.stage = value.stage;
   if (['null', 'undefined', 'object', 'array', 'number', 'string', 'boolean'].includes(value.resultKind)) out.resultKind = value.resultKind;
   if (['envelope', 'legacy', 'empty', 'no-result', 'api-error'].includes(value.transportKind)) out.transportKind = value.transportKind;
   if (PAGE_RESULT_ERROR_CODES.has(value.errorCode)) out.errorCode = value.errorCode;
@@ -179,13 +182,14 @@ function loopSleep(ms) {
 }
 
 const ready = Promise.all([
-  chrome.storage.local.get(['autoAuthorize', 'bridgePort', 'cdpEnabled', 'screenshotCdpEnabled', 'cursorHideSec', 'cursorTrailSec', 'disconnected', 'diagnosticLog']),
+  chrome.storage.local.get(['autoAuthorize', 'bridgePort', 'cdpEnabled', 'screenshotCdpEnabled', 'lifecycleWakeEnabled', 'cursorHideSec', 'cursorTrailSec', 'disconnected', 'diagnosticLog']),
   chrome.storage.session.get('revokedTabIds')
 ]).then(([stored, session]) => {
   for (const id of session.revokedTabIds || []) if (Number.isInteger(id) && id >= 0 && !revocationTouched.has(id)) revoked.add(id);
   autoAuthorize = stored.autoAuthorize === true;
   cdpEnabled = stored.cdpEnabled === true;
   screenshotCdpEnabled = stored.screenshotCdpEnabled !== false;
+  lifecycleWakeEnabled = stored.lifecycleWakeEnabled === true;
   cursorHideMs = Number.isInteger(stored.cursorHideSec) && stored.cursorHideSec >= 0 && stored.cursorHideSec <= 60
     ? stored.cursorHideSec * 1000
     : 10000;
@@ -237,7 +241,7 @@ function withTab(tabId, action) {
   return next;
 }
 
-// snapshot 本身不附加调试器；网站是否拦截仍取决于页面自身策略。
+// 核对页面访问授权；冻结页是否可临时唤醒由独立生命周期用途决定。
 async function ensureAllowed(tabId, check = () => {}) {
   const tab = await browserStep(check, 'tabs.get', () => chrome.tabs.get(tabId));
   check.lifecycle = pageResultDiagnostic({ tabStatus: tab.status, frozen: tab.frozen, discarded: tab.discarded });
@@ -260,8 +264,9 @@ function ensurePageRunnable(tab, check = () => {}) {
 
 // 写入类命令（点击/输入/截屏）才附加调试器；首次写入时才出现提示条。
 function checkCdpPermission(tabId, purpose, generation) {
-  if (generation !== cdpGeneration[purpose] || (purpose === 'screenshot' ? !screenshotCdpEnabled : !cdpEnabled)) {
-    throw Object.assign(new Error(purpose === 'screenshot' ? '截图 CDP 已关闭或授权已变化' : 'CDP 真实交互已关闭或授权已变化'), { code: 'CDP_DISABLED' });
+  const permitted = purpose === 'lifecycle' ? lifecycleWakeEnabled : purpose === 'screenshot' ? screenshotCdpEnabled : purpose === 'input' ? cdpEnabled : false;
+  if (generation !== cdpGeneration[purpose] || !permitted) {
+    throw Object.assign(new Error(purpose === 'lifecycle' ? '后台唤醒已关闭或授权已变化' : purpose === 'screenshot' ? '截图 CDP 已关闭或授权已变化' : 'CDP 真实交互已关闭或授权已变化'), { code: 'CDP_DISABLED' });
   }
   if (revoked.has(tabId) || (!authorized.has(tabId) && !autoAuthorize)) throw new Error('该标签页已释放或授权已变化');
 }
@@ -275,6 +280,7 @@ async function ensureAttached(tabId, purpose = 'input', check = () => {}) {
       await browserStep(check, 'debugger.attach', async () => {
         await chrome.debugger.attach({ tabId }, '1.3');
         attached.add(tabId);
+        if (purpose === 'lifecycle') lifecycleAttachments.add(tabId);
       });
       checkCdpPermission(tabId, purpose, generation);
     } catch (error) {
@@ -282,6 +288,7 @@ async function ensureAttached(tabId, purpose = 'input', check = () => {}) {
       throw error;
     }
   }
+  if (purpose === 'input') lifecycleAttachments.delete(tabId);
   return tab;
 }
 
@@ -295,6 +302,98 @@ async function cdp(tabId, method, params = {}, check = () => {}) {
     checkCdpPermission(tabId, purpose, generation);
     return chrome.debugger.sendCommand({ tabId }, method, params);
   });
+}
+
+// 只为新读取命令尝试一次；不唤醒已有悬挂命令，也不扩展点击/截图权限。
+async function wakeFrozenPage(tab, check) {
+  const tabId = tab.id;
+  const generation = cdpGeneration.lifecycle;
+  const started = Date.now();
+  const wasAttached = attached.has(tabId);
+  check.wakeAttempted = true;
+  check.wakeDiagnostic = { wakeAttempted: true, wakeVerified: false };
+  const guard = () => {
+    check();
+    checkCdpPermission(tabId, 'lifecycle', generation);
+    if (Date.now() - started >= 2500) throw Object.assign(new Error('后台唤醒验证超时'), { code: 'PAGE_WAKE_TIMEOUT' });
+  };
+  guard.diagnostic = check.diagnostic;
+  // 原生步骤沿用同一个命令的阶段和生命周期记录，超时时保留真实卡点。
+  Object.defineProperties(guard, {
+    phase: { get: () => check.phase, set: value => { check.phase = value; } },
+    lifecycle: { get: () => check.lifecycle, set: value => { check.lifecycle = value; } }
+  });
+  const wakeError = error => {
+    const code = ['invalidated', 'timeout', 'CDP_DISABLED', 'TARGET_CHANGED', 'PAGE_WAKE_TIMEOUT'].includes(error?.code) ? error.code : 'PAGE_WAKE_FAILED';
+    diagnostic('page_result', { ...check.diagnostic, ...check.wakeDiagnostic, stage: 'wake', errorCode: code, outcome: 'error' });
+    return Object.assign(new Error('后台唤醒未完成，未继续页面读取；不会切页或重放原操作。'), {
+      code, outcome: 'unverified', diagnostic: pageResultDiagnostic({ stage: 'wake', ...check.lifecycle, ...check.wakeDiagnostic, errorCode: code })
+    });
+  };
+  try {
+    guard();
+    await ensureAttached(tabId, 'lifecycle', guard);
+    guard();
+    const before = await ensureAllowed(tabId, guard);
+    if (before.url !== tab.url || before.windowId !== tab.windowId || before.discarded === true) {
+      throw Object.assign(new Error('唤醒前目标页面身份已变化'), { code: 'TARGET_CHANGED' });
+    }
+    if (before.frozen === true) {
+      await browserStep(guard, 'Page.setWebLifecycleState', () => {
+        guard();
+        return chrome.debugger.sendCommand({ tabId }, 'Page.setWebLifecycleState', { state: 'active' });
+      });
+    }
+    guard();
+    let latest;
+    // 有界确认原生状态；原生API挂起仍受命令总期限和原操作锁保护。
+    for (const delay of [0, 300, 600]) {
+      if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+      guard();
+      latest = await ensureAllowed(tabId, guard);
+      guard();
+      if (latest.url !== tab.url || latest.windowId !== tab.windowId || latest.discarded === true) {
+        throw Object.assign(new Error('唤醒期间目标页面身份已变化'), { code: 'TARGET_CHANGED' });
+      }
+      if (latest.frozen === false) break;
+    }
+    if (latest?.frozen !== false) throw Object.assign(new Error('浏览器未确认页面已解冻'), { code: 'PAGE_WAKE_TIMEOUT' });
+  } catch (error) {
+    throw wakeError(error);
+  } finally {
+    // 只解除自己新建的附加；既有输入附加不属于本次临时唤醒。
+    if (!wasAttached && lifecycleAttachments.has(tabId) && attached.has(tabId)) {
+      try { await detach(tabId, Object.assign(() => {}, { diagnostic: check.diagnostic })); }
+      catch {
+        throw Object.assign(new Error('后台唤醒的临时调试连接未能解除，未继续读取'), {
+          code: 'PAGE_WAKE_FAILED', outcome: 'unverified', diagnostic: pageResultDiagnostic({ stage: 'wake', ...check.wakeDiagnostic })
+        });
+      }
+    }
+  }
+  try {
+    guard();
+    const after = await ensureAllowed(tabId, guard);
+    guard();
+    if (after.url !== tab.url || after.windowId !== tab.windowId || after.discarded === true) {
+      throw Object.assign(new Error('唤醒清理后目标页面身份已变化'), { code: 'TARGET_CHANGED' });
+    }
+    if (after.frozen !== false) throw Object.assign(new Error('清理后浏览器未确认页面可读'), { code: 'PAGE_WAKE_TIMEOUT' });
+    check.wakeDiagnostic.wakeVerified = true;
+    diagnostic('page_result', { ...check.diagnostic, ...check.wakeDiagnostic, stage: 'wake', outcome: 'ok' });
+    return after;
+  } catch (error) {
+    throw wakeError(error);
+  }
+}
+
+async function ensureReadablePage(tab, check) {
+  const eligible = ['snapshot', 'inspect', 'wait'].includes(check.diagnostic?.method);
+  if (tab.frozen === true && tab.discarded !== true && lifecycleWakeEnabled && eligible && !check.pageWorkStarted && !check.wakeAttempted) {
+    return wakeFrozenPage(tab, check);
+  }
+  ensurePageRunnable(tab, check);
+  return tab;
 }
 
 const PAGE_METHODS = Object.freeze(['snapshot', 'scroll', 'inspect', 'prepare', 'focus', 'focusTarget',
@@ -318,7 +417,7 @@ async function pageAgent(tabId, operation, ref, check = () => {}) {
   };
   if (!PAGE_METHODS.includes(operation)) fail('PAGE_AGENT_INVALID_OPERATION', '不支持的页面操作', { stage: 'invoke' });
   check();
-  ensurePageRunnable(await ensureAllowed(tabId, check), check);
+  await ensureReadablePage(await ensureAllowed(tabId, check), check);
   check();
   let injected;
   try {
@@ -335,7 +434,7 @@ async function pageAgent(tabId, operation, ref, check = () => {}) {
   if (Number.isSafeInteger(injected[0].frameId) && injected[0].frameId !== 0) fail('PAGE_AGENT_FRAME_MISMATCH', '页面代理注入返回的框架不是主框架', { ...injectionMeta, frameId: injected[0].frameId });
   report('inject', { ...injectionMeta, frameId: injected[0].frameId, outcome: 'ok' });
   check();
-  ensurePageRunnable(await ensureAllowed(tabId, check), check);
+  await ensureReadablePage(await ensureAllowed(tabId, check), check);
   check();
   let results;
   try {
@@ -347,7 +446,7 @@ async function pageAgent(tabId, operation, ref, check = () => {}) {
       // 显式 async/await 在注入边界捕获；兼容已安装的 agent8，不依赖其 guarded 包装。
       func: async (name, elementRef, deadline) => {
         const protocol = 'ai-browser-page-rpc-v1';
-        const safeCodes = new Set(["PAGE_AGENT_EMPTY_RESULT","PAGE_AGENT_NO_RESULT","PAGE_AGENT_INVALID_RESULT","PAGE_AGENT_API_ERROR","PAGE_AGENT_NOT_READY","PAGE_AGENT_METHOD_MISSING","PAGE_AGENT_SYNC_THROW","PAGE_AGENT_PROMISE_REJECTED","PAGE_AGENT_SERIALIZE_FAILED","PAGE_AGENT_DOCUMENT_CHANGED","PAGE_AGENT_FRAME_MISMATCH","PAGE_AGENT_INVALID_OPERATION","PAGE_AGENT_COMMAND_EXPIRED","TAB_FROZEN","TAB_DISCARDED","PAGE_ACTION_FAILED","INVALID_PARAMS","INVALID_ARGUMENTS","STALE_REF","REF_EXPIRED","STALE_CURSOR","SNAPSHOT_CHANGED","ELEMENT_NOT_VISIBLE","TARGET_CHANGED","ELEMENT_DISABLED","AMBIGUOUS_TARGET","TARGET_OUTSIDE_VIEWPORT","ELEMENT_OBSCURED","UNSUPPORTED_TARGET","UNSUPPORTED_ACTION"]);
+        const safeCodes = new Set(["PAGE_AGENT_EMPTY_RESULT","PAGE_AGENT_NO_RESULT","PAGE_AGENT_INVALID_RESULT","PAGE_AGENT_API_ERROR","PAGE_AGENT_NOT_READY","PAGE_AGENT_METHOD_MISSING","PAGE_AGENT_SYNC_THROW","PAGE_AGENT_PROMISE_REJECTED","PAGE_AGENT_SERIALIZE_FAILED","PAGE_AGENT_DOCUMENT_CHANGED","PAGE_AGENT_FRAME_MISMATCH","PAGE_AGENT_INVALID_OPERATION","PAGE_AGENT_COMMAND_EXPIRED","TAB_FROZEN","TAB_DISCARDED","PAGE_WAKE_FAILED","PAGE_WAKE_TIMEOUT","CDP_DISABLED","PAGE_ACTION_FAILED","INVALID_PARAMS","INVALID_ARGUMENTS","STALE_REF","REF_EXPIRED","STALE_CURSOR","SNAPSHOT_CHANGED","ELEMENT_NOT_VISIBLE","TARGET_CHANGED","ELEMENT_DISABLED","AMBIGUOUS_TARGET","TARGET_OUTSIDE_VIEWPORT","ELEMENT_OBSCURED","UNSUPPORTED_TARGET","UNSUPPORTED_ACTION"]);
         const kind = value => value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
         let agentPresent = false;
         const errorEnvelope = (code, error, stage, extra = {}) => {
@@ -531,6 +630,7 @@ async function listTabs(check = () => {}) {
     inputMode: useCdp ? 'cdp' : 'dom',
     domFallback: domFallbackTabs.has(tab.id),
     screenshotMode: screenshotCdpEnabled ? 'cdp' : 'active-tab',
+    lifecycleWakeEnabled,
     capabilities: { hover: useCdp ? 'cdp' : 'dom-events', cssHover: useCdp,
       pointer: useCdp ? 'cdp' : 'synthetic', drag: useCdp ? 'cdp-pointer' : 'synthetic-pointer-and-html5',
       nativeSelect: 'dom', inspect: true, wait: true, focus: true,
@@ -551,7 +651,7 @@ async function release(tabId, check = () => {}) {
 
 async function detach(tabId, check = () => {}) {
   detaching.add(tabId);
-  try { await browserStep(check, 'debugger.detach', () => chrome.debugger.detach({ tabId })); attached.delete(tabId); }
+  try { await browserStep(check, 'debugger.detach', () => chrome.debugger.detach({ tabId })); attached.delete(tabId); lifecycleAttachments.delete(tabId); }
   finally { detaching.delete(tabId); }
 }
 
@@ -946,12 +1046,13 @@ async function executeBounded(command, parentCheck = () => {}) {
   let outcome = 'ok';
   try {
     // 子项各有11秒期限；父批次不再抢先用相同期限丢掉全部逐项结果。
-    return await (isBatch ? work : bounded(work, 11000, '浏览器操作等待超时，结果不确定；原操作不会自动重放，请停止相关业务并交接维护。'));
+    const result = await (isBatch ? work : bounded(work, 11000, '浏览器操作等待超时，结果不确定；原操作不会自动重放，请停止相关业务并交接维护。'));
+    return check.wakeAttempted ? { ...result, lifecycleWake: { attempted: true, verified: check.wakeDiagnostic?.wakeVerified === true } } : result;
   } catch (error) {
     outcome = ['timeout', 'invalidated'].includes(error.code) ? error.code : 'error';
     operation.timedOut = error.code === 'timeout';
     error.commandId = meta.commandId;
-    error.diagnostic = pageResultDiagnostic({ phase: check.phase, ...check.lifecycle, ...error.diagnostic, durationMs: Date.now() - started });
+    error.diagnostic = pageResultDiagnostic({ phase: check.phase, ...check.lifecycle, ...check.wakeDiagnostic, ...error.diagnostic, durationMs: Date.now() - started });
     throw error;
   } finally {
     expired = true; commandStartedAt = 0;
@@ -984,7 +1085,7 @@ async function connectionStatus() {
     }
   }
   return { bridgeState, connected: !wantDisconnect && verified, connecting: !wantDisconnect && !verified,
-    autoAuthorize, cdpEnabled, screenshotCdpEnabled, cursorHideSec: Math.round(cursorHideMs / 1000),
+    autoAuthorize, cdpEnabled, screenshotCdpEnabled, lifecycleWakeEnabled, cursorHideSec: Math.round(cursorHideMs / 1000),
     cursorTrailSec: Math.round(cursorTrailMs / 1000), bridgePort, authorizedTabIds: [...authorized], revokedTabIds: [...revoked],
     commandRunning: runningTabs.size > 0, lastPollAt: lastPollAt || null };
 }
@@ -1121,8 +1222,20 @@ async function handlePopup(message) {
       cdpGeneration.screenshot++;
       screenshotCdpEnabled = message.enabled === true;
       await chrome.storage.local.set({ screenshotCdpEnabled });
-      if (!screenshotCdpEnabled && !cdpEnabled) await detachAll();
+      if (!screenshotCdpEnabled && !cdpEnabled && !lifecycleWakeEnabled) await detachAll();
       return { screenshotCdpEnabled };
+    }
+    case 'set_lifecycle_wake_enabled': {
+      cdpGeneration.lifecycle++;
+      lifecycleWakeEnabled = message.enabled === true;
+      await chrome.storage.local.set({ lifecycleWakeEnabled });
+      if (!lifecycleWakeEnabled) {
+        const results = await Promise.allSettled([...lifecycleAttachments].map(tabId => bounded(withTab(tabId, async () => {
+          if (lifecycleAttachments.has(tabId) && attached.has(tabId)) await detach(tabId);
+        }), 2000, '临时唤醒连接仍在清理，原操作不会重放')));
+        if (results.some(result => result.status === 'rejected')) throw new Error('后台唤醒已关闭；部分临时连接尚未确认解除，将随原操作结束清理');
+      }
+      return { lifecycleWakeEnabled };
     }
     case 'set_bridge_port': {
       const port = message.port;
@@ -1172,7 +1285,7 @@ async function handlePopup(message) {
       return withTab(message.tabId, async () => {
         const tab = await chrome.tabs.get(message.tabId);
         if (!isHttpUrl(tab.url)) throw new Error('只能授权 HTTP(S) 标签页');
-        // 只登记授权；调试器延迟到首个写入命令才附加（读取全程无提示条）。
+        // 只登记页面访问授权，不附加调试器；输入、截图和冻结唤醒分别检查自身用途开关。
         authorized.add(tab.id);
         await setRevoked(tab.id, false);
         return { authorized: true, tabId: tab.id };
@@ -1196,13 +1309,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 chrome.debugger.onDetach.addListener((source) => {
   if (source.tabId === undefined) return;
   attached.delete(source.tabId);
+  lifecycleAttachments.delete(source.tabId);
   if (!detaching.has(source.tabId)) {
     authorized.delete(source.tabId);
     void setRevoked(source.tabId, true).catch(() => {});
   }
 });
 chrome.webNavigation?.onCreatedNavigationTarget.addListener(event => { void taskTabs.created(event); });
-chrome.tabs.onRemoved.addListener((tabId) => { authorized.delete(tabId); attached.delete(tabId); void setRevoked(tabId, false).catch(() => {}); domFallbackTabs.delete(tabId); taskTabs.removed(tabId); });
+chrome.tabs.onRemoved.addListener((tabId) => { authorized.delete(tabId); attached.delete(tabId); lifecycleAttachments.delete(tabId); void setRevoked(tabId, false).catch(() => {}); domFallbackTabs.delete(tabId); taskTabs.removed(tabId); });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === ALARM) startPolling();
 });
