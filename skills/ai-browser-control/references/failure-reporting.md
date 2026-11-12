@@ -18,6 +18,12 @@
 
 普通网页状态不直接等于插件坏了：有结构的空页面/无匹配结果、分页结束、STALE_REF/STALE_CURSOR、SNAPSHOT_CHANGED、AMBIGUOUS_TARGET、ELEMENT_DISABLED/真实遮挡等，应先按工具已明确的正常流程处理；不能把“没有下载按钮”推成系统故障。已明确的未授权/未登录属于权限缺口，直接说明所需用户步骤，不能推断其他标签页也未授权。
 
+## 超时与忙碌证据
+
+批次逐项保存结果：某项COMMAND_TIMEOUT不抹掉其它项的成功或TAB_BUSY。TAB_BUSY说明本次该项未派发，上一条底层操作仍未结束；不能据此判断上一条操作失败。复用已有list_tabs中的operation.commandId/phase/durationMs/timedOut和浏览器已知status/frozen/discarded；缺字段不推断为false。桥pending=0仅说明没有等待HTTP回执，不能证明页面没有悬挂操作。底层Promise迟到的step_end=ok也不推翻先前超时，更不证明业务完成。
+
+维护补丁可改为立即注入已有DOM，避免无谓等待document_idle；这不能强制唤醒冻结页面或中止已派发的浏览器操作。原操作未结束时保留防重入，不清锁、不重放。若需加载已验证补丁，应先保全证据并区分MCP、桥和扩展的实际版本；扩展重载不等于业务页恢复，恢复后仅做维护授权内的只读核验。
+
 ## 禁止的恢复猜测
 
 - 不因报错文本写着“可能不可见/遮挡”就当成已验证原因；仅null/undefined/没有result只能证明回传缺失。

@@ -212,7 +212,7 @@ export function createBridge({ port = DEFAULT_PORT, host = '127.0.0.1', configDi
           json(res, 504, { error: stale && notDispatched
             ? '扩展待机中（浏览器后台挂起），唤醒超时；命令尚未派发。点一下浏览器里的 AI Browser Control 扩展图标唤醒后再试。'
             : '浏览器指令超时；操作结果不确定，请读取快照确认，勿直接重复提交。',
-            code: notDispatched ? 'COMMAND_NOT_DISPATCHED' : 'COMMAND_TIMEOUT', outcome: notDispatched ? 'not-dispatched' : 'unverified' });
+            code: notDispatched ? 'COMMAND_NOT_DISPATCHED' : 'COMMAND_TIMEOUT', outcome: notDispatched ? 'not-dispatched' : 'unverified', commandId: id });
         }, stale ? rpcWaitWhenStaleMs : commandTimeout);
         res.on('close', () => {
           if (pending.has(id) && !res.writableEnded) log('command_client_closed', { id, method, durationMs: Date.now() - item.started });

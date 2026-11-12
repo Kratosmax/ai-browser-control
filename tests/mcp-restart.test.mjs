@@ -476,3 +476,16 @@ test('page error diagnostic and command id remain visible in text and structured
   assert.match(result.content[0].text, /decode/);
   assert(!JSON.stringify(result).includes('PRIVATE-'));
 });
+
+test('plain timeout command id is visible even without a page diagnostic', { timeout: TEST_TIMEOUT }, async t => {
+  const f = await fixture(t); f.holdRpc();
+  const action = f.client.call('browser_snapshot', { tabId: 7, load: 'current' });
+  const received = await f.arrival('/rpc');
+  received.response.writeHead(504, { 'Content-Type': 'application/json' });
+  received.response.end(JSON.stringify({ error: 'Fixture timeout', code: 'COMMAND_TIMEOUT', outcome: 'unverified', commandId: 'plain-timeout-command' }));
+  const result = await action;
+  assert.equal(result.isError, true);
+  assert.equal(result.structuredContent.error.commandId, 'plain-timeout-command');
+  assert.match(result.content[0].text, /COMMAND_TIMEOUT/);
+  assert.match(result.content[0].text, /plain-timeout-command/);
+});

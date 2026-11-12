@@ -33,6 +33,7 @@ let pairing = null;
 let lastPollAt = 0;
 let commandStartedAt = 0;
 const runningTabs = new Set();
+const runningOperations = new Map();
 const taskTabs = new AiBrowserTasks(chrome, tabId => runningTabs.has(tabId), async tab => {
   if (revoked.has(tab.id)) return 'released';
   if (!authorized.has(tab.id) && !autoAuthorize) return 'not-authorized';
@@ -78,16 +79,20 @@ let diagnosticTimer = null;
 let diagnosticSending = null;
 let diagnosticSaving = false;
 
-const PAGE_RESULT_ERROR_CODES = new Set(["PAGE_AGENT_EMPTY_RESULT","PAGE_AGENT_NO_RESULT","PAGE_AGENT_INVALID_RESULT","PAGE_AGENT_API_ERROR","PAGE_AGENT_NOT_READY","PAGE_AGENT_METHOD_MISSING","PAGE_AGENT_SYNC_THROW","PAGE_AGENT_PROMISE_REJECTED","PAGE_AGENT_SERIALIZE_FAILED","PAGE_AGENT_DOCUMENT_CHANGED","PAGE_AGENT_FRAME_MISMATCH","PAGE_AGENT_INVALID_OPERATION","PAGE_ACTION_FAILED","INVALID_PARAMS","INVALID_ARGUMENTS","STALE_REF","REF_EXPIRED","STALE_CURSOR","SNAPSHOT_CHANGED","ELEMENT_NOT_VISIBLE","TARGET_CHANGED","ELEMENT_DISABLED","AMBIGUOUS_TARGET","TARGET_OUTSIDE_VIEWPORT","ELEMENT_OBSCURED","UNSUPPORTED_TARGET","UNSUPPORTED_ACTION"]);
+const PAGE_RESULT_ERROR_CODES = new Set(["PAGE_AGENT_EMPTY_RESULT","PAGE_AGENT_NO_RESULT","PAGE_AGENT_INVALID_RESULT","PAGE_AGENT_API_ERROR","PAGE_AGENT_NOT_READY","PAGE_AGENT_METHOD_MISSING","PAGE_AGENT_SYNC_THROW","PAGE_AGENT_PROMISE_REJECTED","PAGE_AGENT_SERIALIZE_FAILED","PAGE_AGENT_DOCUMENT_CHANGED","PAGE_AGENT_FRAME_MISMATCH","PAGE_AGENT_INVALID_OPERATION","PAGE_AGENT_COMMAND_EXPIRED","PAGE_ACTION_FAILED","INVALID_PARAMS","INVALID_ARGUMENTS","STALE_REF","REF_EXPIRED","STALE_CURSOR","SNAPSHOT_CHANGED","ELEMENT_NOT_VISIBLE","TARGET_CHANGED","ELEMENT_DISABLED","AMBIGUOUS_TARGET","TARGET_OUTSIDE_VIEWPORT","ELEMENT_OBSCURED","UNSUPPORTED_TARGET","UNSUPPORTED_ACTION"]);
+
+const COMMAND_PHASES = new Set(['queue', 'tabs.get', 'tabs.query', 'tabs.update', 'tabs.create', 'windows.get', 'windows.getLastFocused', 'tabs.captureVisibleTab', 'debugger.attach', 'debugger.detach', 'scripting.inject', 'snapshot', 'scroll', 'inspect', 'prepare', 'focus', 'focusTarget', 'showCursor', 'cursorPulse', 'hideCursor', 'domClick', 'domFill', 'domPress', 'domHover', 'holdHover', 'pointerClick', 'domDrag', 'select', 'waitFor', 'Input.dispatchMouseEvent', 'Input.dispatchKeyEvent', 'Input.insertText', 'Page.captureScreenshot']);
 
 // 固定白名单也用于工具错误回执；绝不携带页面内容或原始异常正文。
 function pageResultDiagnostic(value) {
   const out = {};
   if (!value || typeof value !== 'object') return out;
-  for (const key of ['resultCount', 'frameId']) {
+  for (const key of ['resultCount', 'frameId', 'durationMs']) {
     if (Number.isSafeInteger(value[key]) && value[key] >= 0) out[key] = value[key];
   }
-  for (const key of ['agentPresent', 'documentChanged']) if (typeof value[key] === 'boolean') out[key] = value[key];
+  for (const key of ['agentPresent', 'documentChanged', 'frozen', 'discarded']) if (typeof value[key] === 'boolean') out[key] = value[key];
+  if (['loading', 'complete'].includes(value.tabStatus)) out.tabStatus = value.tabStatus;
+  if (COMMAND_PHASES.has(value.phase)) out.phase = value.phase;
   if (['inject', 'invoke', 'decode', 'serialize'].includes(value.stage)) out.stage = value.stage;
   if (['null', 'undefined', 'object', 'array', 'number', 'string', 'boolean'].includes(value.resultKind)) out.resultKind = value.resultKind;
   if (['envelope', 'legacy', 'empty', 'no-result', 'api-error'].includes(value.transportKind)) out.transportKind = value.transportKind;
@@ -235,6 +240,7 @@ function withTab(tabId, action) {
 // snapshot 本身不附加调试器；网站是否拦截仍取决于页面自身策略。
 async function ensureAllowed(tabId, check = () => {}) {
   const tab = await browserStep(check, 'tabs.get', () => chrome.tabs.get(tabId));
+  check.lifecycle = pageResultDiagnostic({ tabStatus: tab.status, frozen: tab.frozen, discarded: tab.discarded });
   if (!isHttpUrl(tab.url)) throw new Error('仅允许操作 HTTP(S) 标签页');
   if (revoked.has(tabId) || (!authorized.has(tabId) && !autoAuthorize)) throw new Error('该标签页尚未手动授权或已释放，请在弹窗中授权此页');
   return tab;
@@ -305,7 +311,8 @@ async function pageAgent(tabId, operation, ref, check = () => {}) {
   let injected;
   try {
     injected = await browserStep(check, 'scripting.inject', () => chrome.scripting.executeScript({
-      target: { tabId }, world: 'ISOLATED', files: ['cursor.js', 'page-agent.js']
+      // load=current读取已经存在的DOM，不等待页面document_idle；长连接/慢资源不应阻塞注入。
+      target: { tabId }, world: 'ISOLATED', injectImmediately: true, files: ['cursor.js', 'page-agent.js']
     }));
   } catch (error) { apiFailure(error, 'inject'); }
   const injectionMeta = { stage: 'inject', resultCount: Array.isArray(injected) ? injected.length : undefined };
@@ -323,11 +330,11 @@ async function pageAgent(tabId, operation, ref, check = () => {}) {
     results = await browserStep(check, operation, () => chrome.scripting.executeScript({
       // Chrome提供documentId时锁定注入的同一文档，避免页面导航后把操作派到新文档。
       target: { tabId, ...(typeof injected[0].documentId === 'string' && injected[0].documentId ? { documentIds: [injected[0].documentId] } : {}) },
-      world: 'ISOLATED',
+      world: 'ISOLATED', injectImmediately: true,
       // 显式 async/await 在注入边界捕获；兼容已安装的 agent8，不依赖其 guarded 包装。
-      func: async (name, elementRef) => {
+      func: async (name, elementRef, deadline) => {
         const protocol = 'ai-browser-page-rpc-v1';
-        const safeCodes = new Set(["PAGE_AGENT_EMPTY_RESULT","PAGE_AGENT_NO_RESULT","PAGE_AGENT_INVALID_RESULT","PAGE_AGENT_API_ERROR","PAGE_AGENT_NOT_READY","PAGE_AGENT_METHOD_MISSING","PAGE_AGENT_SYNC_THROW","PAGE_AGENT_PROMISE_REJECTED","PAGE_AGENT_SERIALIZE_FAILED","PAGE_AGENT_DOCUMENT_CHANGED","PAGE_AGENT_FRAME_MISMATCH","PAGE_AGENT_INVALID_OPERATION","PAGE_ACTION_FAILED","INVALID_PARAMS","INVALID_ARGUMENTS","STALE_REF","REF_EXPIRED","STALE_CURSOR","SNAPSHOT_CHANGED","ELEMENT_NOT_VISIBLE","TARGET_CHANGED","ELEMENT_DISABLED","AMBIGUOUS_TARGET","TARGET_OUTSIDE_VIEWPORT","ELEMENT_OBSCURED","UNSUPPORTED_TARGET","UNSUPPORTED_ACTION"]);
+        const safeCodes = new Set(["PAGE_AGENT_EMPTY_RESULT","PAGE_AGENT_NO_RESULT","PAGE_AGENT_INVALID_RESULT","PAGE_AGENT_API_ERROR","PAGE_AGENT_NOT_READY","PAGE_AGENT_METHOD_MISSING","PAGE_AGENT_SYNC_THROW","PAGE_AGENT_PROMISE_REJECTED","PAGE_AGENT_SERIALIZE_FAILED","PAGE_AGENT_DOCUMENT_CHANGED","PAGE_AGENT_FRAME_MISMATCH","PAGE_AGENT_INVALID_OPERATION","PAGE_AGENT_COMMAND_EXPIRED","PAGE_ACTION_FAILED","INVALID_PARAMS","INVALID_ARGUMENTS","STALE_REF","REF_EXPIRED","STALE_CURSOR","SNAPSHOT_CHANGED","ELEMENT_NOT_VISIBLE","TARGET_CHANGED","ELEMENT_DISABLED","AMBIGUOUS_TARGET","TARGET_OUTSIDE_VIEWPORT","ELEMENT_OBSCURED","UNSUPPORTED_TARGET","UNSUPPORTED_ACTION"]);
         const kind = value => value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
         let agentPresent = false;
         const errorEnvelope = (code, error, stage, extra = {}) => {
@@ -344,6 +351,8 @@ async function pageAgent(tabId, operation, ref, check = () => {}) {
             'holdHover', 'cursorPulse', 'hideCursor', 'domClick', 'domHover', 'pointerClick', 'domDrag',
             'select', 'waitFor', 'domFill', 'domPress'];
           if (!methods.includes(name)) return errorEnvelope('PAGE_AGENT_INVALID_OPERATION', '不支持的页面操作', 'invoke');
+          // Chrome回调可能在期限后才开始；进入页面方法前拒绝，不能让迟到回调执行写入。
+          if (Number.isFinite(deadline) && Date.now() >= deadline) return errorEnvelope('PAGE_AGENT_COMMAND_EXPIRED', '页面操作已过期，未调用页面方法', 'invoke');
           const agent = globalThis.__aiBrowserPageAgent8;
           agentPresent = !!agent;
           if (!agent) return errorEnvelope('PAGE_AGENT_NOT_READY', '页面代理未就绪', 'invoke');
@@ -369,7 +378,7 @@ async function pageAgent(tabId, operation, ref, check = () => {}) {
           } catch (error) { return errorEnvelope('PAGE_AGENT_SERIALIZE_FAILED', error, 'serialize', { resultKind }); }
         } catch (error) { return errorEnvelope('PAGE_AGENT_SYNC_THROW', error, 'invoke'); }
       },
-      args: [operation, ref ?? null]
+      args: [operation, ref ?? null, Number.isFinite(check.deadline) ? check.deadline : null]
     }));
   } catch (error) {
     if (typeof injected[0].documentId === 'string' && /No document with id/i.test(String(error?.message ?? ''))) {
@@ -487,6 +496,16 @@ async function listTabs(check = () => {}) {
     title: tab.title || '',
     url: tab.url,
     active: Boolean(tab.active),
+    ...(typeof tab.status === 'string' ? { status: tab.status } : {}),
+    ...(typeof tab.frozen === 'boolean' ? { frozen: tab.frozen } : {}),
+    ...(typeof tab.discarded === 'boolean' ? { discarded: tab.discarded } : {}),
+    ...(runningOperations.has(tab.id) ? { operation: {
+      commandId: runningOperations.get(tab.id).check.diagnostic.commandId,
+      method: runningOperations.get(tab.id).check.diagnostic.method,
+      phase: runningOperations.get(tab.id).check.phase,
+      durationMs: Date.now() - runningOperations.get(tab.id).started,
+      timedOut: runningOperations.get(tab.id).timedOut
+    } } : {}),
     managed: taskTabs.tabs.has(tab.id),
     taskId: taskTabs.tabs.get(tab.id)?.taskId,
     taskName: taskTabs.tabs.get(tab.id)?.name,
@@ -566,7 +585,7 @@ async function execute(command, check = () => {}) {
       try { return { ok: true, result: await executeBounded({ id: `${command.id}-${index}`, ...item }, check) }; }
       catch (error) {
         const diagnostic = pageResultDiagnostic(error.diagnostic);
-        return { ok: false, error: { code: error.code || 'BROWSER_ACTION_FAILED', message: errorMessage(error), outcome: 'unverified',
+        return { ok: false, error: { code: error.code === 'timeout' ? 'COMMAND_TIMEOUT' : error.code === 'invalidated' ? 'CONNECTION_INVALIDATED' : error.code || 'BROWSER_ACTION_FAILED', message: errorMessage(error), outcome: error.outcome || 'unverified',
           commandId: String(command.id) + '-' + index, ...(Object.keys(diagnostic).length ? { diagnostic } : {}) } };
       }
     }));
@@ -882,12 +901,17 @@ async function ensurePaired() {
 async function executeBounded(command, parentCheck = () => {}) {
   parentCheck();
   const tabId = command.params?.tabId;
+  const isBatch = command.method === 'batch';
   const meta = { commandId: String(command.id), method: command.method, tabId, epoch: connectionEpoch, port: bridgePort };
-  if (runningTabs.has(tabId)) {
+  if (!isBatch && runningTabs.has(tabId)) {
     diagnostic('command_end', { ...meta, outcome: 'busy' });
-    throw new Error('此标签页上一条操作仍未结束，结果不确定；请勿重复提交。可操作其他标签页。');
+    const previous = runningOperations.get(tabId);
+    throw Object.assign(new Error('此标签页上一条操作仍未结束，结果不确定；本次未派发，请勿重复提交。可操作其他标签页。'), {
+      code: 'TAB_BUSY', outcome: 'not-dispatched', commandId: meta.commandId,
+      diagnostic: pageResultDiagnostic({ phase: previous?.check.phase, ...previous?.check.lifecycle })
+    });
   }
-  runningTabs.add(tabId);
+  if (!isBatch) runningTabs.add(tabId);
   commandStartedAt = Date.now();
   let expired = false;
   const epoch = connectionEpoch;
@@ -895,13 +919,25 @@ async function executeBounded(command, parentCheck = () => {}) {
   const check = () => { parentCheck(); if (expired || epoch !== connectionEpoch || wantDisconnect) throw Object.assign(new Error('原操作已过期或连接已变化，未继续派发动作；已派发部分结果不确定。'), { code: 'invalidated' }); };
   check.diagnostic = meta;
   check.phase = 'queue';
+  check.deadline = isBatch ? undefined : started + 11000;
   diagnostic('command_start', meta);
-  const work = Promise.resolve().then(() => execute(command, check)).finally(() => runningTabs.delete(tabId));
+  const operation = { check, started, timedOut: false };
+  if (!isBatch) runningOperations.set(tabId, operation);
+  const work = Promise.resolve().then(() => execute(command, check)).finally(() => {
+    if (!isBatch) {
+      runningTabs.delete(tabId);
+      if (runningOperations.get(tabId) === operation) runningOperations.delete(tabId);
+    }
+  });
   let outcome = 'ok';
   try {
-    return await bounded(work, 11000, '浏览器操作等待超时，结果不确定；轮询已恢复，原操作不会自动重放，请先回读。');
+    // 子项各有11秒期限；父批次不再抢先用相同期限丢掉全部逐项结果。
+    return await (isBatch ? work : bounded(work, 11000, '浏览器操作等待超时，结果不确定；原操作不会自动重放，请停止相关业务并交接维护。'));
   } catch (error) {
     outcome = ['timeout', 'invalidated'].includes(error.code) ? error.code : 'error';
+    operation.timedOut = error.code === 'timeout';
+    error.commandId = meta.commandId;
+    error.diagnostic = pageResultDiagnostic({ phase: check.phase, ...check.lifecycle, ...error.diagnostic, durationMs: Date.now() - started });
     throw error;
   } finally {
     expired = true; commandStartedAt = 0;

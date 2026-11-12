@@ -223,3 +223,11 @@ test('批量子项保留同样的安全diagnostic和子命令ID，失败不重�
   assert.equal(vm.runInContext('calls', h.page), 1);
   assert(!JSON.stringify(batch.results[0].error.diagnostic).includes('PRIVATE'));
 });
+
+test('callback queued past its deadline cannot enter a page write method', async () => {
+  const h = await harness('globalThis.calls=0;globalThis.__aiBrowserPageAgent8={domFill(){calls++;return {filled:true}}}');
+  h.context.expiredDeadline = Date.now() - 1;
+  await assert.rejects(h.run("pageAgent(7,'domFill',{ref:'r1-1',text:'private'},Object.assign(()=>{},{deadline:expiredDeadline,diagnostic:{commandId:'expired-write',method:'fill',tabId:7}}))"), error => error.code === 'PAGE_AGENT_COMMAND_EXPIRED');
+  assert.equal(vm.runInContext('calls', h.page), 0);
+  assert.equal(h.scripts.filter(spec => spec.func).length, 1);
+});

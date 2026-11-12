@@ -92,7 +92,7 @@ process.on('message', message => {
     const diagnostic = pageResultDiagnostic(error.diagnostic);
     const commandId = typeof error.commandId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(error.commandId) ? error.commandId : undefined;
     // 有些宿主只展示text而隐藏structuredContent；固定安全证据也放入文字，确保可一次交接。
-    const text = Object.keys(diagnostic).length ? error.message + '\n诊断：' + JSON.stringify({ code: error.code || 'BROWSER_ACTION_FAILED', ...(commandId ? { commandId } : {}), ...diagnostic }) : error.message;
+    const text = commandId || Object.keys(diagnostic).length ? error.message + '\n诊断：' + JSON.stringify({ code: error.code || 'BROWSER_ACTION_FAILED', ...(commandId ? { commandId } : {}), ...diagnostic }) : error.message;
     send({ type: 'result', id: message.id, result: { isError: true, content: [{ type: 'text', text }],
       structuredContent: { error: { code: error.code || 'BROWSER_ACTION_FAILED', message: error.message, outcome: error.outcome || 'unverified',
         ...(error.diagnostic && Object.keys(pageResultDiagnostic(error.diagnostic) || {}).length ? { diagnostic: pageResultDiagnostic(error.diagnostic) } : {}),

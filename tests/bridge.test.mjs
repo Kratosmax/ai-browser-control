@@ -293,6 +293,7 @@ test('待机命令已派发后超时必须报告结果不确定，不能提示�
   assert.equal(response.status, 504);
   const data = await response.json();
   assert.equal(data.code, 'COMMAND_TIMEOUT');
+  assert.equal(data.commandId, command.id);
   assert.equal(data.outcome, 'unverified');
   assert.match(data.error, /勿直接重复提交/);
   assert.doesNotMatch(data.error, /唤醒.*重试/);

@@ -128,3 +128,10 @@ test('diagnostic错误码必须属于固定集合，不能仅凭字符格式记�
   assert(!JSON.stringify(diagnosticEvent({ event: 'page_result', errorCode: 'PRIVATE_BILLING_SECRET', stage: 'decode' })).includes('PRIVATE'));
   assert.deepEqual(pageResultDiagnostic({ errorCode: 'PAGE_AGENT_EMPTY_RESULT' }), { errorCode: 'PAGE_AGENT_EMPTY_RESULT' });
 });
+
+test('timeout metadata retains only fixed lifecycle fields and known phases', () => {
+  const filtered = pageResultDiagnostic({ phase: 'scripting.inject', durationMs: 11000, frozen: false, discarded: true, tabStatus: 'loading', url: 'PRIVATE-URL', details: 'PRIVATE-TEXT' });
+  assert.deepEqual(filtered, { durationMs: 11000, frozen: false, discarded: true, tabStatus: 'loading', phase: 'scripting.inject' });
+  assert.deepEqual(pageResultDiagnostic({ phase: 'PRIVATE-PHASE', durationMs: -1, frozen: 'PRIVATE', discarded: 1, tabStatus: 'PRIVATE-STATUS' }), {});
+  assert.equal(diagnosticEvent({ event: 'command_end', ...filtered }).phase, 'scripting.inject');
+});
