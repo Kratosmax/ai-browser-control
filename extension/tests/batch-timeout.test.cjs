@@ -89,9 +89,54 @@ test('file injection and same-document invocation run immediately without changi
 
 test('listTabs exposes known lifecycle state and omits unavailable lifecycle fields', async () => {
   const h = harness(); await tick(); h.run('wantDisconnect = false'); delete h.tabs[0].frozen; delete h.tabs[0].status;
-  h.tabs[1].frozen = true;
+  h.tabs[1].frozen = true; h.tabs[1].autoDiscardable = false;
   const list = await h.run('listTabs()');
   assert.equal(Object.hasOwn(list[0], 'frozen'), false); assert.equal(Object.hasOwn(list[0], 'status'), false);
   assert.equal(list[1].frozen, true); assert.equal(list[1].discarded, false);
+  assert.equal(list[1].autoDiscardable, false); assert.equal(Object.hasOwn(list[0], 'autoDiscardable'), false);
   assert.equal(list[0].operation, undefined);
+});
+
+test('known-frozen DOM commands reject before any injection and leave no unfinished operation', async () => {
+  const h = harness(); await tick(); h.run('wantDisconnect = false'); h.tabs[0].frozen = true; h.tabs[0].active = true;
+  for (const method of ['snapshot','fill','click','inspect','scroll','wait','focus']) {
+    await assert.rejects(h.run("executeBounded({id:'frozen-" + method + "',method:'" + method + "',params:{tabId:7,ref:'r1-1',text:'private',key:'Enter',load:'current'}})"), error => {
+      assert.equal(error.code, 'TAB_FROZEN'); assert.equal(error.outcome, 'not-dispatched');
+      assert.equal(error.diagnostic.stage, 'preflight'); assert.equal(error.diagnostic.frozen, true);
+      return true;
+    });
+  }
+  assert.equal(h.scripts.length, 0);
+  assert.equal(h.run('runningTabs.size'), 0); assert.equal(h.run('runningOperations.size'), 0);
+  assert.equal([...h.timers.values()].filter(timer => timer.ms === 11000).length, 0);
+});
+
+test('frozen sibling is reported immediately and a healthy sibling still succeeds', async () => {
+  const h = harness(); await tick(); h.run('wantDisconnect = false'); h.tabs[0].frozen = true;
+  const result = await h.run("executeBounded({id:'mixed-frozen',method:'batch',params:{commands:[{method:'snapshot',params:{tabId:7,load:'current'}},{method:'snapshot',params:{tabId:9,load:'current'}}]}})");
+  assert.equal(result.results[0].error.code, 'TAB_FROZEN'); assert.equal(result.results[0].error.outcome, 'not-dispatched');
+  assert.equal(result.results[0].error.commandId, 'mixed-frozen-0'); assert.equal(result.results[1].ok, true);
+  assert.equal(h.scripts.filter(spec => spec.target.tabId === 7).length, 0);
+  h.tabs[0].frozen = false;
+  assert.equal((await h.run("executeBounded({id:'fresh-after-wake',method:'snapshot',params:{tabId:7,load:'current'}})")).title, 'Fixture');
+});
+
+test('freeze between injection and invocation prevents entering the page method', async () => {
+  const h = harness(); await tick(); h.run('wantDisconnect = false');
+  h.run("globalThis.nativeScript=chrome.scripting.executeScript;chrome.scripting.executeScript=async spec=>{const result=await nativeScript(spec);if(spec.files)(await chrome.tabs.get(7)).frozen=true;return result;}");
+  await assert.rejects(h.run("executeBounded({id:'freeze-midway',method:'fill',params:{tabId:7,ref:'r1-1',text:'private'}})"), error => error.code === 'TAB_FROZEN' && error.outcome === 'not-dispatched');
+  assert.equal(h.scripts.length, 1); assert(h.scripts[0].files);
+  assert.equal(h.run('runningTabs.size'), 0);
+});
+
+test('discarded DOM target is distinguished without implicit reload or injection', async () => {
+  const h = harness(); await tick(); h.run('wantDisconnect = false'); h.tabs[0].discarded = true;
+  await assert.rejects(h.run("executeBounded({id:'discarded',method:'snapshot',params:{tabId:7,load:'current'}})"), error => error.code === 'TAB_DISCARDED' && error.outcome === 'not-dispatched' && error.diagnostic.discarded === true);
+  assert.equal(h.scripts.length, 0); assert.equal(h.run('runningTabs.size'), 0);
+});
+
+test('a known-frozen state does not relabel previously entered page work as not dispatched', async () => {
+  const h = harness(); await tick(); h.run('wantDisconnect = false'); h.tabs[0].frozen = true;
+  await assert.rejects(h.run("pageAgent(7,'domFill',{ref:'r1-1',text:'private'},Object.assign(()=>{},{pageWorkStarted:true,diagnostic:{commandId:'later-stage',method:'fill',tabId:7}}))"), error => error.code === 'TAB_FROZEN' && error.outcome === 'unverified');
+  assert.equal(h.scripts.length, 0);
 });

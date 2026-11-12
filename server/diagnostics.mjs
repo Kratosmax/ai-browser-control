@@ -51,7 +51,7 @@ const PHASES = new Set(['queue', 'tabs.get', 'tabs.query', 'tabs.update', 'tabs.
   'domHover', 'holdHover', 'pointerClick', 'domDrag', 'select', 'waitFor',
   'Input.dispatchMouseEvent', 'Input.dispatchKeyEvent', 'Input.insertText', 'Page.captureScreenshot']);
 
-const PAGE_RESULT_ERROR_CODES = new Set(["PAGE_AGENT_EMPTY_RESULT","PAGE_AGENT_NO_RESULT","PAGE_AGENT_INVALID_RESULT","PAGE_AGENT_API_ERROR","PAGE_AGENT_NOT_READY","PAGE_AGENT_METHOD_MISSING","PAGE_AGENT_SYNC_THROW","PAGE_AGENT_PROMISE_REJECTED","PAGE_AGENT_SERIALIZE_FAILED","PAGE_AGENT_DOCUMENT_CHANGED","PAGE_AGENT_FRAME_MISMATCH","PAGE_AGENT_INVALID_OPERATION","PAGE_AGENT_COMMAND_EXPIRED","PAGE_ACTION_FAILED","INVALID_PARAMS","INVALID_ARGUMENTS","STALE_REF","REF_EXPIRED","STALE_CURSOR","SNAPSHOT_CHANGED","ELEMENT_NOT_VISIBLE","TARGET_CHANGED","ELEMENT_DISABLED","AMBIGUOUS_TARGET","TARGET_OUTSIDE_VIEWPORT","ELEMENT_OBSCURED","UNSUPPORTED_TARGET","UNSUPPORTED_ACTION"]);
+const PAGE_RESULT_ERROR_CODES = new Set(["PAGE_AGENT_EMPTY_RESULT","PAGE_AGENT_NO_RESULT","PAGE_AGENT_INVALID_RESULT","PAGE_AGENT_API_ERROR","PAGE_AGENT_NOT_READY","PAGE_AGENT_METHOD_MISSING","PAGE_AGENT_SYNC_THROW","PAGE_AGENT_PROMISE_REJECTED","PAGE_AGENT_SERIALIZE_FAILED","PAGE_AGENT_DOCUMENT_CHANGED","PAGE_AGENT_FRAME_MISMATCH","PAGE_AGENT_INVALID_OPERATION","PAGE_AGENT_COMMAND_EXPIRED","TAB_FROZEN","TAB_DISCARDED","PAGE_ACTION_FAILED","INVALID_PARAMS","INVALID_ARGUMENTS","STALE_REF","REF_EXPIRED","STALE_CURSOR","SNAPSHOT_CHANGED","ELEMENT_NOT_VISIBLE","TARGET_CHANGED","ELEMENT_DISABLED","AMBIGUOUS_TARGET","TARGET_OUTSIDE_VIEWPORT","ELEMENT_OBSCURED","UNSUPPORTED_TARGET","UNSUPPORTED_ACTION"]);
 
 export function pageResultDiagnostic(value) {
   const out = {};
@@ -62,7 +62,7 @@ export function pageResultDiagnostic(value) {
   for (const key of ['agentPresent', 'documentChanged', 'frozen', 'discarded']) if (typeof value[key] === 'boolean') out[key] = value[key];
   if (['loading', 'complete'].includes(value.tabStatus)) out.tabStatus = value.tabStatus;
   if (PHASES.has(value.phase)) out.phase = value.phase;
-  if (['inject', 'invoke', 'decode', 'serialize'].includes(value.stage)) out.stage = value.stage;
+  if (['preflight', 'inject', 'invoke', 'decode', 'serialize'].includes(value.stage)) out.stage = value.stage;
   if (['null', 'undefined', 'object', 'array', 'number', 'string', 'boolean'].includes(value.resultKind)) out.resultKind = value.resultKind;
   if (['envelope', 'legacy', 'empty', 'no-result', 'api-error'].includes(value.transportKind)) out.transportKind = value.transportKind;
   if (PAGE_RESULT_ERROR_CODES.has(value.errorCode)) out.errorCode = value.errorCode;

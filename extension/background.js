@@ -79,7 +79,7 @@ let diagnosticTimer = null;
 let diagnosticSending = null;
 let diagnosticSaving = false;
 
-const PAGE_RESULT_ERROR_CODES = new Set(["PAGE_AGENT_EMPTY_RESULT","PAGE_AGENT_NO_RESULT","PAGE_AGENT_INVALID_RESULT","PAGE_AGENT_API_ERROR","PAGE_AGENT_NOT_READY","PAGE_AGENT_METHOD_MISSING","PAGE_AGENT_SYNC_THROW","PAGE_AGENT_PROMISE_REJECTED","PAGE_AGENT_SERIALIZE_FAILED","PAGE_AGENT_DOCUMENT_CHANGED","PAGE_AGENT_FRAME_MISMATCH","PAGE_AGENT_INVALID_OPERATION","PAGE_AGENT_COMMAND_EXPIRED","PAGE_ACTION_FAILED","INVALID_PARAMS","INVALID_ARGUMENTS","STALE_REF","REF_EXPIRED","STALE_CURSOR","SNAPSHOT_CHANGED","ELEMENT_NOT_VISIBLE","TARGET_CHANGED","ELEMENT_DISABLED","AMBIGUOUS_TARGET","TARGET_OUTSIDE_VIEWPORT","ELEMENT_OBSCURED","UNSUPPORTED_TARGET","UNSUPPORTED_ACTION"]);
+const PAGE_RESULT_ERROR_CODES = new Set(["PAGE_AGENT_EMPTY_RESULT","PAGE_AGENT_NO_RESULT","PAGE_AGENT_INVALID_RESULT","PAGE_AGENT_API_ERROR","PAGE_AGENT_NOT_READY","PAGE_AGENT_METHOD_MISSING","PAGE_AGENT_SYNC_THROW","PAGE_AGENT_PROMISE_REJECTED","PAGE_AGENT_SERIALIZE_FAILED","PAGE_AGENT_DOCUMENT_CHANGED","PAGE_AGENT_FRAME_MISMATCH","PAGE_AGENT_INVALID_OPERATION","PAGE_AGENT_COMMAND_EXPIRED","TAB_FROZEN","TAB_DISCARDED","PAGE_ACTION_FAILED","INVALID_PARAMS","INVALID_ARGUMENTS","STALE_REF","REF_EXPIRED","STALE_CURSOR","SNAPSHOT_CHANGED","ELEMENT_NOT_VISIBLE","TARGET_CHANGED","ELEMENT_DISABLED","AMBIGUOUS_TARGET","TARGET_OUTSIDE_VIEWPORT","ELEMENT_OBSCURED","UNSUPPORTED_TARGET","UNSUPPORTED_ACTION"]);
 
 const COMMAND_PHASES = new Set(['queue', 'tabs.get', 'tabs.query', 'tabs.update', 'tabs.create', 'windows.get', 'windows.getLastFocused', 'tabs.captureVisibleTab', 'debugger.attach', 'debugger.detach', 'scripting.inject', 'snapshot', 'scroll', 'inspect', 'prepare', 'focus', 'focusTarget', 'showCursor', 'cursorPulse', 'hideCursor', 'domClick', 'domFill', 'domPress', 'domHover', 'holdHover', 'pointerClick', 'domDrag', 'select', 'waitFor', 'Input.dispatchMouseEvent', 'Input.dispatchKeyEvent', 'Input.insertText', 'Page.captureScreenshot']);
 
@@ -93,7 +93,7 @@ function pageResultDiagnostic(value) {
   for (const key of ['agentPresent', 'documentChanged', 'frozen', 'discarded']) if (typeof value[key] === 'boolean') out[key] = value[key];
   if (['loading', 'complete'].includes(value.tabStatus)) out.tabStatus = value.tabStatus;
   if (COMMAND_PHASES.has(value.phase)) out.phase = value.phase;
-  if (['inject', 'invoke', 'decode', 'serialize'].includes(value.stage)) out.stage = value.stage;
+  if (['preflight', 'inject', 'invoke', 'decode', 'serialize'].includes(value.stage)) out.stage = value.stage;
   if (['null', 'undefined', 'object', 'array', 'number', 'string', 'boolean'].includes(value.resultKind)) out.resultKind = value.resultKind;
   if (['envelope', 'legacy', 'empty', 'no-result', 'api-error'].includes(value.transportKind)) out.transportKind = value.transportKind;
   if (PAGE_RESULT_ERROR_CODES.has(value.errorCode)) out.errorCode = value.errorCode;
@@ -246,6 +246,18 @@ async function ensureAllowed(tabId, check = () => {}) {
   return tab;
 }
 
+// 原生冻结页不能执行任务。只判断浏览器已知状态，不用注入去等待其自行解冻。
+function ensurePageRunnable(tab, check = () => {}) {
+  const code = tab.frozen === true ? 'TAB_FROZEN' : tab.discarded === true ? 'TAB_DISCARDED' : null;
+  if (!code) return;
+  const diagnostic = pageResultDiagnostic({ stage: 'preflight', phase: 'tabs.get', ...check.lifecycle, errorCode: code });
+  throw Object.assign(new Error(code === 'TAB_FROZEN'
+    ? '目标页已被浏览器冻结，页面脚本无法运行；本次未继续注入。请先由用户唤醒该页，再重新定位；后台唤醒需要独立授权，不会自动切页、刷新、改节能设置或开启CDP。'
+    : '目标页已被浏览器丢弃，页面内容不在内存；本次未继续注入。请先由用户恢复该页，再重新定位；不会自动刷新或重放。'), {
+    code, outcome: check.pageWorkStarted ? 'unverified' : 'not-dispatched', diagnostic
+  });
+}
+
 // 写入类命令（点击/输入/截屏）才附加调试器；首次写入时才出现提示条。
 function checkCdpPermission(tabId, purpose, generation) {
   if (generation !== cdpGeneration[purpose] || (purpose === 'screenshot' ? !screenshotCdpEnabled : !cdpEnabled)) {
@@ -306,7 +318,7 @@ async function pageAgent(tabId, operation, ref, check = () => {}) {
   };
   if (!PAGE_METHODS.includes(operation)) fail('PAGE_AGENT_INVALID_OPERATION', '不支持的页面操作', { stage: 'invoke' });
   check();
-  await ensureAllowed(tabId, check);
+  ensurePageRunnable(await ensureAllowed(tabId, check), check);
   check();
   let injected;
   try {
@@ -323,10 +335,11 @@ async function pageAgent(tabId, operation, ref, check = () => {}) {
   if (Number.isSafeInteger(injected[0].frameId) && injected[0].frameId !== 0) fail('PAGE_AGENT_FRAME_MISMATCH', '页面代理注入返回的框架不是主框架', { ...injectionMeta, frameId: injected[0].frameId });
   report('inject', { ...injectionMeta, frameId: injected[0].frameId, outcome: 'ok' });
   check();
-  await ensureAllowed(tabId, check);
+  ensurePageRunnable(await ensureAllowed(tabId, check), check);
   check();
   let results;
   try {
+    check.pageWorkStarted = true;
     results = await browserStep(check, operation, () => chrome.scripting.executeScript({
       // Chrome提供documentId时锁定注入的同一文档，避免页面导航后把操作派到新文档。
       target: { tabId, ...(typeof injected[0].documentId === 'string' && injected[0].documentId ? { documentIds: [injected[0].documentId] } : {}) },
@@ -334,7 +347,7 @@ async function pageAgent(tabId, operation, ref, check = () => {}) {
       // 显式 async/await 在注入边界捕获；兼容已安装的 agent8，不依赖其 guarded 包装。
       func: async (name, elementRef, deadline) => {
         const protocol = 'ai-browser-page-rpc-v1';
-        const safeCodes = new Set(["PAGE_AGENT_EMPTY_RESULT","PAGE_AGENT_NO_RESULT","PAGE_AGENT_INVALID_RESULT","PAGE_AGENT_API_ERROR","PAGE_AGENT_NOT_READY","PAGE_AGENT_METHOD_MISSING","PAGE_AGENT_SYNC_THROW","PAGE_AGENT_PROMISE_REJECTED","PAGE_AGENT_SERIALIZE_FAILED","PAGE_AGENT_DOCUMENT_CHANGED","PAGE_AGENT_FRAME_MISMATCH","PAGE_AGENT_INVALID_OPERATION","PAGE_AGENT_COMMAND_EXPIRED","PAGE_ACTION_FAILED","INVALID_PARAMS","INVALID_ARGUMENTS","STALE_REF","REF_EXPIRED","STALE_CURSOR","SNAPSHOT_CHANGED","ELEMENT_NOT_VISIBLE","TARGET_CHANGED","ELEMENT_DISABLED","AMBIGUOUS_TARGET","TARGET_OUTSIDE_VIEWPORT","ELEMENT_OBSCURED","UNSUPPORTED_TARGET","UNSUPPORTED_ACTION"]);
+        const safeCodes = new Set(["PAGE_AGENT_EMPTY_RESULT","PAGE_AGENT_NO_RESULT","PAGE_AGENT_INVALID_RESULT","PAGE_AGENT_API_ERROR","PAGE_AGENT_NOT_READY","PAGE_AGENT_METHOD_MISSING","PAGE_AGENT_SYNC_THROW","PAGE_AGENT_PROMISE_REJECTED","PAGE_AGENT_SERIALIZE_FAILED","PAGE_AGENT_DOCUMENT_CHANGED","PAGE_AGENT_FRAME_MISMATCH","PAGE_AGENT_INVALID_OPERATION","PAGE_AGENT_COMMAND_EXPIRED","TAB_FROZEN","TAB_DISCARDED","PAGE_ACTION_FAILED","INVALID_PARAMS","INVALID_ARGUMENTS","STALE_REF","REF_EXPIRED","STALE_CURSOR","SNAPSHOT_CHANGED","ELEMENT_NOT_VISIBLE","TARGET_CHANGED","ELEMENT_DISABLED","AMBIGUOUS_TARGET","TARGET_OUTSIDE_VIEWPORT","ELEMENT_OBSCURED","UNSUPPORTED_TARGET","UNSUPPORTED_ACTION"]);
         const kind = value => value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
         let agentPresent = false;
         const errorEnvelope = (code, error, stage, extra = {}) => {
@@ -496,6 +509,7 @@ async function listTabs(check = () => {}) {
     title: tab.title || '',
     url: tab.url,
     active: Boolean(tab.active),
+    ...(typeof tab.autoDiscardable === 'boolean' ? { autoDiscardable: tab.autoDiscardable } : {}),
     ...(typeof tab.status === 'string' ? { status: tab.status } : {}),
     ...(typeof tab.frozen === 'boolean' ? { frozen: tab.frozen } : {}),
     ...(typeof tab.discarded === 'boolean' ? { discarded: tab.discarded } : {}),
@@ -1038,7 +1052,7 @@ async function pollLoop() {
         try {
           payload = { id: command.id, result: await executeBounded(command) };
         } catch (error) {
-          payload = { id: command.id, error: { message: errorMessage(error), code: error.code === 'timeout' ? 'COMMAND_TIMEOUT' : error.code === 'invalidated' ? 'CONNECTION_INVALIDATED' : error.code || 'BROWSER_ACTION_FAILED', outcome: 'unverified', ...(error.diagnostic ? { diagnostic: pageResultDiagnostic(error.diagnostic) } : {}) } };
+          payload = { id: command.id, error: { message: errorMessage(error), code: error.code === 'timeout' ? 'COMMAND_TIMEOUT' : error.code === 'invalidated' ? 'CONNECTION_INVALIDATED' : error.code || 'BROWSER_ACTION_FAILED', outcome: error.outcome || 'unverified', ...(error.diagnostic ? { diagnostic: pageResultDiagnostic(error.diagnostic) } : {}) } };
         }
         payload = boundedResult(payload);
         remember(command.id, payload);

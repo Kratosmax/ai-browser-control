@@ -2,7 +2,7 @@
 
 让支持 MCP 的 AI 助手按标签页读取和操作真实 Edge / Chrome。后台操作不切换标签页、不移动系统鼠标。
 
-当前版本：0.16.2。修复批次外层超时吞掉逐页结果；注入已有DOM不再等待document_idle，超时错误保留阶段和命令ID，标签列表显示未结束操作及浏览器已知页面状态。保留逐页防重入、迟到操作保护和首次故障交接。现场注入悬挂的具体底层原因仍需证据，不能把补丁或重载等同于业务恢复。本仓库提供源码，不另设此版本的 GitHub Release。
+当前版本：0.16.3。已知冻结或丢弃的页面在注入前立即返回TAB_FROZEN/TAB_DISCARDED，不再无谓等待11秒并创建新的挂起操作；正常页的批量结果继续保留。保持旧命令真正结束前的防重入、不自动切页/刷新/CDP唤醒。浏览器为何自动冻结及持续后台恢复仍需单独处理，本补丁不声称业务页面已唤醒。本仓库提供源码，不另设此版本的 GitHub Release。
 
 ## 开始使用
 
@@ -93,6 +93,12 @@ taskId和taskName为open必填参数；升级后客户端必须重连读取新�
 清理须同时满足三项：AI创建或连带创建；当前仍在目标任务分组；agent已评估操作结束，或页面数量超限。某些页面对应操作已结束、总任务还在继续时，用browser_task(action=close,tabIds=[...])只关闭指定管理页；整个任务结束才finish。cleanup用于超过12页时整理。满足三项时允许关闭活动、有声、固定或有未保存输入的页面，不再将这些状态当成禁止清理条件。显式keep的交付页继续保留，正在执行命令的页面本轮跳过。keep页可先unkeep再按页close。adopt需要taskName和pages，每项明确tabId、精确url、当前groupId和evidence:{kind,reference}；reference应指向真实AI创建/连带创建回执，无证据不得登记。回执closed仅列独立核验已消失的页，closedCount=0必须说明实际关闭0页，不能称清理完成；浏览器自身的关闭限制不绕过。任务名称与结束信号仍由agent传入，插件不按空闲时间猜测任务结束。
 
 browser_batch一次最多4个不同tabId，支持快照、截图及交互，返回逐项结果；同页依赖步骤继续顺序执行，批次不是事务，失败不重放业务操作。每项独立保留成功/超时/忙碌结果，超时含commandId及安全phase/lifecycle诊断；list_tabs中的operation保留未结束命令及timedOut状态，桥pending=0不代表该页空闲。注入文件和页面调用使用injectImmediately读取已存在DOM，不等待document_idle，不激活页面或绕过冻结/权限。遇到DOM歧义、遮挡或状态冲突时，技能要求先截图/inspect复查，再判断是否确实需要用户处理。详见[任务、并行与验收](skills/ai-browser-control/references/tasks-and-verification.md)。
+
+### 冻结页面
+
+浏览器报告frozen=true时，页面无法执行任务；injectImmediately只避免document_idle等待，不能解除冻结。0.16.3在文件注入前与页面方法调用前检查原生状态：新操作返回TAB_FROZEN/TAB_DISCARDED、stage=preflight及准确的not-dispatched/unverified；已占用页仍优先TAB_BUSY，不清锁、不重放。list_tabs可读取autoDiscardable，但它只代表自动丢弃资格，不是解冻参数，插件不修改它。
+
+用户唤醒页面后，先确认frozen=false和旧operation已结束，再进行新的读取。冻结页恢复不等于业务已完成；已取证进度应保留。现有截图/输入CDP开关不授权Page.setWebLifecycleState后台唤醒，0.16.3不新增或启用该用途。浏览器站点休眠例外会同时影响节能和自动丢弃，应由用户单独选择，不能保证解决所有内存压力下的冻结。
 
 ### MCP重载
 
@@ -215,9 +221,10 @@ python -X utf8 tests/browser-extension.py
 python -X utf8 tests/browser-loading.py
 python -X utf8 tests/browser-lifecycle.py
 python -X utf8 tests/browser-timeout.py
+python -B tests/browser-frozen.py
 ```
 
-Python 项仅供开发验收，依赖测试机已有 Python Playwright、Pillow 和 Edge；不属于运行时依赖，不自动安装或复制全局工具。UI 对照测试还需要 Git 历史中的基线提交（见 REQUIREMENTS.md）；纯 ZIP 没有该历史时无法生成旧版对照。它们使用独立临时浏览器配置和测试桥，不控制用户的标签页。证据输出到 `temp/qa/`。无 CDP 截图正向夹具的额外权限与正式清单不同，具体限制在测试记录中明确列出。
+Python 项仅供开发验收，依赖测试机已有 Python Playwright、Pillow 和 Edge；browser-frozen.py另需已有websocket-client以便只连接私有测试浏览器、不自动附加页面。不属于运行时依赖，不自动安装或复制全局工具。UI 对照测试还需要 Git 历史中的基线提交（见 REQUIREMENTS.md）；纯 ZIP 没有该历史时无法生成旧版对照。它们使用独立临时浏览器配置和测试桥，不控制用户的标签页。证据输出到 `temp/qa/`。无 CDP 截图正向夹具的额外权限与正式清单不同，具体限制在测试记录中明确列出。
 
 本地预览包放在 `temp/ai-browser-control-local-preview.zip`；这是源码预览，不是正式 Release。解压后可加载其中的 `extension` 目录，不包含 Node 或浏览器副本。
 

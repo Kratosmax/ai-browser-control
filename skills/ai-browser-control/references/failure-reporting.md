@@ -18,6 +18,12 @@
 
 普通网页状态不直接等于插件坏了：有结构的空页面/无匹配结果、分页结束、STALE_REF/STALE_CURSOR、SNAPSHOT_CHANGED、AMBIGUOUS_TARGET、ELEMENT_DISABLED/真实遮挡等，应先按工具已明确的正常流程处理；不能把“没有下载按钮”推成系统故障。已明确的未授权/未登录属于权限缺口，直接说明所需用户步骤，不能推断其他标签页也未授权。
 
+## 已知冻结或丢弃页面
+
+TAB_FROZEN/TAB_DISCARDED且outcome=not-dispatched说明浏览器已报告该页冻结或丢弃，本次未进入页面方法；这是页面生命周期缺口，不等于MCP或整个DOM通道失效。立即说明该页待恢复、保留进度；其它不依赖该页且已授权的工作可继续，不为已知冻结每次都发起新一轮插件维护。没有现成且已授权的恢复入口时说明需要用户唤醒；不自动切页、刷新、重建页面、改休眠设置或用截图授权代替CDP唤醒权限。页面唤醒后先用已有/必要的一次list_tabs核对frozen=false及旧operation已结束，再重新读取并定位；不能重放未知结果的写入。
+
+若outcome=unverified，可能已有较早步骤执行；若operation仍在或出现COMMAND_TIMEOUT，保留未知结果与原命令编号，按下方超时交接处理，不能降格为“未派发”。缺少frozen字段保持未知。已知冻结的新请求在0.16.3起应立即返回，若仍进入注入并超时，按实际错误交接。
+
 ## 超时与忙碌证据
 
 批次逐项保存结果：某项COMMAND_TIMEOUT不抹掉其它项的成功或TAB_BUSY。TAB_BUSY说明本次该项未派发，上一条底层操作仍未结束；不能据此判断上一条操作失败。复用已有list_tabs中的operation.commandId/phase/durationMs/timedOut和浏览器已知status/frozen/discarded；缺字段不推断为false。桥pending=0仅说明没有等待HTTP回执，不能证明页面没有悬挂操作。底层Promise迟到的step_end=ok也不推翻先前超时，更不证明业务完成。

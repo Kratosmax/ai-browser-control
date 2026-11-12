@@ -279,7 +279,7 @@ export function createBridge({ port = DEFAULT_PORT, host = '127.0.0.1', configDi
         clearTimeout(item.timer);
         if (data.error) {
           const diagnostic = pageResultDiagnostic(data.error.diagnostic);
-          json(item.res, 502, { error: String(data.error.message ?? data.error), code: /^[A-Z_]{1,50}$/.test(data.error.code) ? data.error.code : 'BROWSER_ACTION_FAILED', outcome: 'unverified',
+          json(item.res, 502, { error: String(data.error.message ?? data.error), code: /^[A-Z_]{1,50}$/.test(data.error.code) ? data.error.code : 'BROWSER_ACTION_FAILED', outcome: data.error.outcome === 'not-dispatched' ? 'not-dispatched' : 'unverified',
             ...(diagnostic && Object.keys(diagnostic).length ? { diagnostic } : {}), commandId: data.id });
         }
         else json(item.res, 200, { result: data.result });

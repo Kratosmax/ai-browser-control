@@ -412,3 +412,15 @@ test('页面回传故障在桥与MCP请求层保留安全诊断和命令关联�
   assert(!JSON.stringify(error.diagnostic).includes('PRIVATE'));
   for (const key of ['url', 'payload', 'exception']) assert(!Object.hasOwn(error.diagnostic, key));
 });
+
+test('frozen preflight preserves not-dispatched outcome and fixed metadata through HTTP', async t => {
+  const { port, get, post, waitFor } = await isolatedBridge(t);
+  const polling = get('/poll', EXT_A); await waitFor(s => s.client === EXT_A);
+  const pending = bridgeRequest('/rpc', { port, body: { method: 'snapshot', params: { tabId: 42, load: 'current' } } }).catch(error => error);
+  const command = await (await polling).json();
+  await post('/result', EXT_A, { id: command.id, error: { code: 'TAB_FROZEN', message: 'Frozen fixture', outcome: 'not-dispatched', diagnostic: { stage: 'preflight', phase: 'tabs.get', frozen: true, discarded: false, errorCode: 'TAB_FROZEN', url: 'PRIVATE-URL', text: 'PRIVATE-TEXT' } } });
+  const error = await pending;
+  assert.equal(error.code, 'TAB_FROZEN'); assert.equal(error.outcome, 'not-dispatched'); assert.equal(error.commandId, command.id);
+  assert.equal(error.diagnostic.stage, 'preflight'); assert.equal(error.diagnostic.frozen, true);
+  assert(!JSON.stringify(error.diagnostic).includes('PRIVATE'));
+});
