@@ -349,6 +349,12 @@ try:
                     worker.evaluate("handlePopup({type:'connect'})")
                     failed = hung.result(timeout=20)
                     assert 'error' in failed
+                # connect只确认配对；以桥的近期poll确认命令通道恢复后再发下一条命令。
+                # unpair会立即取消RPC；底层悬挂操作仍受11秒期限保护，不能以RPC返回当作worker已出队。
+                deadline = time.monotonic() + 15
+                while not tool('browser_status')['connected']:
+                    assert time.monotonic() < deadline, '重连后命令通道未恢复'
+                    page.wait_for_timeout(50)
                 assert next(tab for tab in tool('browser_list_tabs') if tab['id'] == tab_id)
                 worker.evaluate('qaResume()')
                 page.wait_for_timeout(200)
@@ -372,10 +378,10 @@ try:
                 assert any(e['event'] == 'command_deliver' and e['id'] == timeout['commandId'] for e in lines)
                 assert any(e['event'] == 'extension_event' and e['diagnostic'].get('commandId') == timeout['commandId'] and e['diagnostic'].get('outcome') == 'timeout' for e in lines)
                 status = tool('browser_status')
-                assert status['version'] == manifest['version'] == status['extensionVersion'] == '0.12.0'
+                assert status['version'] == manifest['version'] == status['extensionVersion']
                 assert len(diagnostics) <= 128 and len(json.dumps(diagnostics)) <= 65536
                 (OUT / 'diagnostics-real-edge.json').write_text(json.dumps({'status': status, 'timeout': timeout, 'events': lines}, ensure_ascii=False, indent=2), encoding='utf-8')
-                report['checks'].append({'name': '真实Edge诊断跨命令ID关联派发/悬挂prepare/超时、存储有界、桥与扩展版本0.12.0一致', 'passed': True})
+                report['checks'].append({'name': '真实Edge诊断跨命令ID关联派发/悬挂prepare/超时、存储有界、桥与扩展实际版本一致', 'passed': True})
 
                 # 停止临时桥模拟网络中断；独立弹窗必须变为异常/正在连接，并自动恢复。
                 popup = context.new_page()

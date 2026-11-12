@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -16,42 +16,125 @@ const run = (args, home, appData) => spawnSync(process.execPath, [path.join(repo
   env: { ...process.env, APPDATA: appData }
 });
 
-test('restartOutdatedBridges：旧版本桥被替换为当前版本进程', async (t) => {
-  const net = await import('node:net');
-  const { spawn } = await import('node:child_process');
-  const portFree = (port) => new Promise((res) => {
-    const srv = net.createServer();
-    srv.once('error', () => res(false));
-    srv.once('listening', () => srv.close(() => res(true)));
-    srv.listen(port, '127.0.0.1');
+test('restartOutdatedBridges：旧版本桥被替换，进程与配置均隔离', { skip: process.platform !== 'win32' }, async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-restart-home-'));
+  const children = [];
+  // 先登记清理，断言/启动失败也只结束本测试直接创建的 ChildProcess。
+  t.after(async () => {
+    for (const child of children) {
+      if (child.exitCode === null && child.signalCode === null) {
+        const exited = new Promise(resolve => child.once('exit', resolve));
+        child.kill();
+        await exited;
+      }
+    }
+    fs.rmSync(home, { recursive: true, force: true });
   });
-  let port = 17990;
-  while (port < 18020 && !(await portFree(port))) port++;
-  assert.ok(port < 18020, '找到空闲测试端口');
-
-  // 用当前代码启动一个"运行中的桥"进程
-  const logDir = path.join(os.tmpdir(), 'zcode-restart-' + String(port));
-  fs.mkdirSync(logDir, { recursive: true });
-  const log = fs.openSync(path.join(logDir, 'bridge.log'), 'a');
-  const child = spawn(process.execPath, [path.join(repo, 'server', 'bridge.mjs'), '--bridge', '--port', String(port)], { detached: true, stdio: ['ignore', log, log] });
-  child.unref();
-  fs.closeSync(log);
-  const health = async () => { try { return await (await fetch('http://127.0.0.1:' + port + '/health')).json(); } catch { return null; } };
-  let h = null;
-  for (let i = 0; i < 30 && !(h = await health()); i++) await new Promise(r => setTimeout(r, 200));
-  assert.ok(h, '测试桥应启动');
-
-  const pluginVersion = JSON.parse(fs.readFileSync(path.join(repo, '.zcode-plugin', 'plugin.json'), 'utf8')).version;
-  const result = await restartOutdatedBridges({ candidates: [{ port, host: '127.0.0.1', allowIps: [] }], localVersion: '0.0.0-test' });
+  const net = await import('node:net');
+  const listener = net.createServer();
+  await new Promise(resolve => listener.listen(0, '127.0.0.1', resolve));
+  const port = listener.address().port;
+  await new Promise(resolve => listener.close(resolve));
+  const spawnOwned = (...args) => {
+    const child = spawn(...args);
+    children.push(child);
+    return child;
+  };
+  const configDir = path.join(home, 'custom-bridge-state');
+  spawnOwned(process.execPath, [path.join(repo, 'server', 'bridge.mjs'), '--bridge', '--port', String(port), '--config-dir', configDir], {
+    stdio: 'ignore', env: { ...process.env, HOME: home, USERPROFILE: home }
+  });
+  // 同端口另一 IP 上的普通服务也由本测试创建，重启不能误杀它。
+  const unrelated = spawnOwned(process.execPath, ['--input-type=module', '-e', `import http from 'node:http'; http.createServer((req, res) => res.end(JSON.stringify({ service: 'unrelated' }))).listen(${port}, '127.0.0.2');`], { stdio: 'ignore' });
+  const health = async (host = '127.0.0.1') => {
+    try { return await (await fetch('http://' + host + ':' + port + '/health', { signal: AbortSignal.timeout(500) })).json(); } catch { return null; }
+  };
+  let before;
+  for (let i = 0; i < 50 && !(before = await health()); i++) await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(before?.service, 'ai-browser-control', '测试桥应启动');
+  let other;
+  for (let i = 0; i < 50 && !(other = await health('127.0.0.2')); i++) await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(other?.service, 'unrelated', '另一个 IP 上的同端口服务应启动');
+  const tokenFile = path.join(configDir, 'token');
+  const originalToken = fs.readFileSync(tokenFile, 'utf8');
+  assert.equal(fs.existsSync(path.join(home, '.zcode', 'ai-browser-control', String(port))), false, '配置只写入显式临时目录');
+  const processChecks = [];
+  const result = await restartOutdatedBridges({
+    candidates: [{ port, host: '127.0.0.1', allowIps: [], pid: children[0].pid }],
+    localVersion: '0.0.0-test', home, spawnBridge: spawnOwned,
+    run: (...args) => { const checked = spawnSync(...args); processChecks.push(checked); return checked; }
+  });
   assert.equal(result.length, 1);
-  assert.equal(result[0].was, h.version);
-  await new Promise(r => setTimeout(r, 500));
-  const after = await health();
-  assert.equal(after?.version, pluginVersion, '重启后应为当前版本');
+  assert.equal(result[0].killed, true, JSON.stringify({ result, processChecks }));
+  assert.equal(result[0].was, before.version);
+  assert.equal(result[0].now, before.version, JSON.stringify(result));
+  assert.equal(children.length, 3);
+  assert.equal(result[0].pid, children[2].pid);
+  assert.notEqual(children[0].pid, children[2].pid);
+  assert.equal((await health())?.version, before.version);
+  assert.equal(fs.readFileSync(tokenFile, 'utf8'), originalToken, '更新保留原桥显式配置目录与token');
+  assert.equal(unrelated.exitCode, null, '同端口不同 IP 的进程保持存活');
+  assert.equal((await health('127.0.0.2'))?.service, 'unrelated');
+});
 
-  killPortListener(port);
-  fs.rmSync(logDir, { recursive: true, force: true });
-  fs.rmSync(path.join(os.homedir(), '.zcode', 'ai-browser-control', String(port)), { recursive: true, force: true });
+test('killPortListener：精确端点、本仓库入口与 PID 身份验证后才终止', () => {
+  const port = 17999;
+  const bridge = path.join(repo, 'server', 'bridge.mjs');
+  const info = { pid: 987654, executable: process.execPath, created: 'test-start', started: '123456', command: `"${process.execPath}" "${bridge}" --bridge --port ${port}` };
+  const calls = [];
+  const run = (command, args) => {
+    calls.push({ command, args });
+    return { status: 0, stdout: JSON.stringify(info) };
+  };
+  assert.equal(killPortListener(port, { platform: 'win32', expectedPid: info.pid, run }), true);
+  assert.equal(calls.length, 3);
+  assert.match(calls[0].args.at(-1), /LocalAddress -ceq '127\.0\.0\.1'/);
+  assert.match(calls[0].args.at(-1), /LocalPort -eq 17999/);
+  assert.equal(calls[2].command, 'powershell.exe');
+  assert.match(calls[2].args.at(-1), /GetProcessById/);
+  assert.match(calls[2].args.at(-1), /\$heldHandle = \$target\.Handle/);
+  assert.match(calls[2].args.at(-1), /StartTime[\s\S]+Get-CimInstance[\s\S]+Get-NetTCPConnection[\s\S]+\$target\.Kill\(\)/);
+
+  for (const override of [
+    { pid: process.pid }, { pid: 0 }, { executable: bridge },
+    { command: `"${process.execPath}" "${path.join(repo, 'server', 'mcp.mjs')}" --bridge --port ${port}` },
+    { command: info.command.replace('--bridge', '--status') },
+    { command: info.command.replace(String(port), String(port + 1)) },
+    { command: info.command + ' --host 0.0.0.0' },
+    { command: info.command + ' --port 17653' },
+    { command: info.command + ' --eval anything' },
+    { created: '' }, { started: '' }
+  ]) {
+    let terminated = false;
+    const fake = (command, args) => { if (args.at(-1).includes('$target.Kill()')) terminated = true; return { status: 0, stdout: JSON.stringify({ ...info, ...override }) }; };
+    assert.equal(killPortListener(port, { platform: 'win32', run: fake }), false, JSON.stringify(override));
+    assert.equal(terminated, false);
+  }
+  let probes = 0;
+  assert.equal(killPortListener(port, { platform: 'win32', run: () => ({ status: 0, stdout: JSON.stringify({ ...info, created: String(++probes) }) }) }), false, 'PID 创建时间变化时拒绝终止');
+  for (const options of [{ platform: 'linux' }, { platform: 'darwin' }, { platform: 'win32', host: '192.0.2.1' }, { platform: 'win32', host: "127.0.0.1';exit" }]) {
+    assert.equal(killPortListener(port, { ...options, run: () => assert.fail('拒绝的目标不能查询或终止进程') }), false);
+  }
+  for (const response of [{ status: 1, stdout: JSON.stringify(info) }, { status: 0, stdout: '{}' }, { status: 0, stdout: 'invalid' }]) {
+    assert.equal(killPortListener(port, { platform: 'win32', run: () => response }), false);
+  }
+  assert.equal(killPortListener(port, { platform: 'win32', expectedPid: info.pid + 1, run }), false);
+  let count = 0;
+  assert.equal(killPortListener(port, { platform: 'win32', run: () => ++count < 3 ? { status: 0, stdout: JSON.stringify(info) } : { status: 1 } }), false, '终止命令失败不能报告成功');
+});
+
+test('restartOutdatedBridges：伪装 health 的非桥服务保持运行且不新起', async t => {
+  const { createServer } = await import('node:http');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-unrelated-home-'));
+  const server = createServer((req, res) => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ service: 'ai-browser-control', version: 'old' })); });
+  t.after(async () => { await new Promise(resolve => server.close(resolve)); fs.rmSync(home, { recursive: true, force: true }); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  const result = await restartOutdatedBridges({ candidates: [{ port, host: '127.0.0.1' }], localVersion: 'new', home, spawnBridge: () => assert.fail('非桥服务不应触发新进程') });
+  assert.equal(result[0].killed, false);
+  assert.match(result[0].now, /无法安全确认/);
+  assert.equal((await (await fetch('http://127.0.0.1:' + port + '/health')).json()).version, 'old');
+  assert.deepEqual(fs.readdirSync(home), []);
 });
 
 test('check 只读预检：输出指引与桥清单，不创建任何配置', (t) => {

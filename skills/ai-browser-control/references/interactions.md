@@ -2,6 +2,8 @@
 
 先检查当前工具目录与browser_status的bridgeMethods，再从browser_list_tabs读取实际输入模式和capabilities。新工具不存在时报告客户端目录需要重连，不自行包装MCP/HTTP、不切换桌面控制；桥支持不代表已加载扩展也支持。
 
+插件首次出现连接/注入/空回传/内部运行时或超时不可用时，按[故障交接](failure-reporting.md)立即停止并报告，下列正常页面回读步骤不得用于反复试错；维护者另获明确排障授权后才继续诊断。
+
 ## 菜单触发
 
 1. snapshot(load=current)定位触发器，查看hasPopup、expanded、disabled、focused、checked、controls；必要时inspect读取遮挡、位置、select选项和身份是否变化。同名按钮传expectedContext，出现多个嵌套同名节点时结合tag/role/截图定位，不能靠上下文相同就认定唯一。
@@ -23,7 +25,7 @@
 - focus只取得页面内焦点，不移动系统焦点；press可传ref及expectedContext，避免键盘送给错误控件。支持Shift+Tab、Alt+ArrowDown/Up、Shift+F10、Control+Enter以及原有键；Enter/Control+Enter可能提交。
 - 原生select先inspect读取value选项，再select(values=[...])；多选可传多个值。已达到目标状态则不重复派发。自绘下拉框仍走菜单流程，不用select冒充支持。
 - set_checked对checkbox/radio/ARIA switch等按目标布尔状态幂等操作；已符合时changed=false。原生radio不能单独取消。verified只确认读取到的控件状态，不代表业务已保存；自绘组件延迟更新仍需wait/snapshot回读。
-- inspect可读不可见/禁用节点和identityChanged；出现身份变化时重新snapshot，不操作旧ref。快照的ref最多150个，新增状态字段不改变覆盖范围限制。
+- inspect可读不可见/禁用节点和identityChanged；出现身份变化时重新snapshot，不操作旧ref。快照每批最多150个ref，可用目标查询和cursor分页；编号变化按对应错误流程处理。
 - wait可用ref或text或精确name+role，ref不与其他条件混用。ref等待不刷新快照；等待隐藏时移除或不可见可匹配，节点复用成另一身份则报错。wait不自动滚动；name可能重复，返回count不是唯一性证明。
 - 拖拽必须核对fromRef/toRef各自业务身份，两个目标同时在同一主文档视口。DOM支持合成指针与HTML5 DataTransfer；CDP为真实指针拖动，不保证任意HTML5组件。动作结束会释放按键；结果未知先回读，不自动重放。
 

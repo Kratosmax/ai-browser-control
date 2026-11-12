@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createLogger } from '../server/diagnostics.mjs';
+import { createLogger, diagnosticEvent, pageResultDiagnostic } from '../server/diagnostics.mjs';
 import { createBridge, VERSION } from '../server/bridge.mjs';
 
 test('日志按字节轮转，只保留当前与两份历史；旧超大日志也收敛到上限', t => {
@@ -72,4 +72,59 @@ test('扩展诊断须配对、有批次大小限制，落盘只保留固定元�
     assert.equal(entry.diagnostic.phase, 'domFill');
     assert.equal(entry.diagnostic.outcome, 'timeout');
   } finally { await bridge.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('page_result 诊断及错误透传共用严格白名单，异常正文和页面资料不能自由写盘', () => {
+  const safe = { stage: 'decode', resultKind: 'null', transportKind: 'empty', resultCount: 1, frameId: 0,
+    errorCode: 'PAGE_AGENT_EMPTY_RESULT', agentPresent: true, documentChanged: false, exceptionKind: 'TypeError' };
+  const input = { ...safe, event: 'page_result', commandId: 'command-1', method: 'snapshot', outcome: 'error',
+    error: { message: 'PRIVATE-EXCEPTION' }, message: 'PRIVATE-MESSAGE', stack: 'PRIVATE-STACK',
+    documentId: 'PRIVATE-DOCUMENT', url: 'PRIVATE-URL', title: 'PRIVATE-TITLE', text: 'PRIVATE-TEXT',
+    input: 'PRIVATE-INPUT', image: 'PRIVATE-IMAGE', payload: { title: 'PRIVATE-PAYLOAD' } };
+  assert.deepEqual(pageResultDiagnostic(input), safe);
+  const event = diagnosticEvent(input);
+  assert.deepEqual(event, { event: 'page_result', ...safe, commandId: 'command-1', method: 'snapshot', outcome: 'error' });
+  assert(!JSON.stringify(event).includes('PRIVATE-'));
+  for (const key of Object.keys(safe)) {
+    assert.equal(pageResultDiagnostic({ [key]: 'PRIVATE-UNRECOGNIZED' })[key], undefined, key);
+  }
+  for (const n of [-1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.deepEqual(pageResultDiagnostic({ resultCount: n, frameId: n }), {});
+  }
+  for (const code of ['lowercase', 'HAS-DASH', 'A'.repeat(65), '', 'PRIVATE-URL']) {
+    assert.deepEqual(pageResultDiagnostic({ errorCode: code }), {});
+  }
+  for (const empty of [null, undefined, 'PRIVATE-TEXT', 42]) assert.deepEqual(pageResultDiagnostic(empty), {});
+});
+
+test('page_result HTTP 上报落盘保留枚举与一致性布尔值，丢弃任意页面/异常字段', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'browser-page-result-'));
+  const bridge = createBridge({ port: 0, configDir: dir, pollTimeout: 20 });
+  const port = await bridge.start(), base = 'http://127.0.0.1:' + port;
+  const id = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const headers = { Origin: 'chrome-extension://' + id, 'X-Client-Id': id, 'Content-Type': 'application/json' };
+  const post = (route, body) => fetch(base + route, { method: 'POST', headers, body: JSON.stringify(body) });
+  try {
+    await post('/pair', {});
+    const events = ['inject', 'invoke', 'decode', 'serialize'].map((stage, seq) => ({
+      event: 'page_result', commandId: 'page-rpc-1', method: 'snapshot', version: VERSION, seq, stage,
+      transportKind: 'envelope', resultKind: 'object', resultCount: 1, frameId: 0, agentPresent: true,
+      documentChanged: false, errorCode: 'PAGE_AGENT_SYNC_THROW', exceptionKind: 'TypeError', outcome: 'error',
+      exception: 'PRIVATE-EXCEPTION', message: 'PRIVATE-MESSAGE', documentId: 'PRIVATE-DOC',
+      url: 'PRIVATE-URL', title: 'PRIVATE-TITLE', text: 'PRIVATE-TEXT', input: 'PRIVATE-INPUT', image: 'PRIVATE-IMAGE',
+      diagnostic: { arbitrary: 'PRIVATE-NESTED' }
+    }));
+    assert.equal((await post('/diagnostics', { events })).status, 200);
+    const text = fs.readFileSync(path.join(dir, 'bridge.log'), 'utf8');
+    assert(!text.includes('PRIVATE-'));
+    const entries = text.trim().split('\n').map(line => JSON.parse(line)).filter(e => e.event === 'extension_event');
+    assert.deepEqual(entries.map(e => e.diagnostic.stage), ['inject', 'invoke', 'decode', 'serialize']);
+    assert(entries.every(e => e.diagnostic.commandId === 'page-rpc-1' && e.diagnostic.documentChanged === false && e.diagnostic.agentPresent === true));
+  } finally { await bridge.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('diagnostic错误码必须属于固定集合，不能仅凭字符格式记录业务敏感值', () => {
+  assert.deepEqual(pageResultDiagnostic({ errorCode: 'PRIVATE_BILLING_SECRET' }), {});
+  assert(!JSON.stringify(diagnosticEvent({ event: 'page_result', errorCode: 'PRIVATE_BILLING_SECRET', stage: 'decode' })).includes('PRIVATE'));
+  assert.deepEqual(pageResultDiagnostic({ errorCode: 'PAGE_AGENT_EMPTY_RESULT' }), { errorCode: 'PAGE_AGENT_EMPTY_RESULT' });
 });

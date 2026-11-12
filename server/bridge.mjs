@@ -5,10 +5,14 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { createLogger, diagnosticEvent, LOG_MAX_BYTES, LOG_BACKUPS } from './diagnostics.mjs';
+import { createLogger, diagnosticEvent, pageResultDiagnostic, LOG_MAX_BYTES, LOG_BACKUPS } from './diagnostics.mjs';
 import { validateCommand, METHODS } from './protocol.mjs';
 
 export const DEFAULT_PORT = 17653;
+const COMMAND_TIMEOUT_MS = 12000;
+const RPC_WAIT_WHEN_STALE_MS = 25000;
+const RPC_RESPONSE_MARGIN_MS = 5000;
+const EXTENSION_LEASE_MS = 90000;
 export const SERVICE_NAME = 'ai-browser-control';
 export const VERSION = JSON.parse(fs.readFileSync(new URL('../.zcode-plugin/plugin.json', import.meta.url), 'utf8')).version;
 // 本地配置目录：扩展白名单、实例日志与远程访问 token。
@@ -88,23 +92,43 @@ export { validateCommand } from './protocol.mjs';
 // 该边界只隔离网页来源；本机进程的信任范围与旧 token 方案相同（token 文件它们本来就读得到）。
 // 桥实例：host 默认只绑本机回环。跨机器访问时绑定网卡（--host 0.0.0.0 或局域网 IP），
 // 此时远程请求必须携带 Bearer token，可选 allowedIps 限制来源 IP。
-export function createBridge({ port = DEFAULT_PORT, host = '127.0.0.1', configDir = bridgeDir(port), token = loadOrCreateToken(configDir), allowedIps = [], commandTimeout = 12000, pollTimeout = 20000, maxOrigins = 8, staleAfterMs = 35000, rpcWaitWhenStaleMs = 25000 } = {}) {
+export function createBridge({ port = DEFAULT_PORT, host = '127.0.0.1', configDir = bridgeDir(port), token = loadOrCreateToken(configDir), allowedIps = [], commandTimeout = COMMAND_TIMEOUT_MS, pollTimeout = 20000, maxOrigins = 8, staleAfterMs = 35000, rpcWaitWhenStaleMs = RPC_WAIT_WHEN_STALE_MS, leaseMs = EXTENSION_LEASE_MS } = {}) {
   const pending = new Map();
   const queue = [];
   let poll = null;
   let lastSeen = 0;
   let lastClient = null;
+  let lease = null;
   const extensionVersions = new Map();
   let allowedOrigins = loadAllowlist(configDir);
   const isAllowed = origin => typeof origin === 'string' && allowedOrigins.includes(origin);
   const log = createLogger(configDir);
+  const renewLease = client => {
+    lastSeen = Date.now();
+    lastClient = client;
+    lease = { client, expiresAt: lastSeen + leaseMs };
+  };
+  // 长轮询结束不释放所有权；执行中的命令即使超过心跳期限也固定原扩展。
+  const leaseHeld = () => lease && (Date.now() < lease.expiresAt || poll ||
+    [...pending.values()].some(item => item.recipient === lease.client));
+  const cancelClientCommands = client => {
+    for (const [id, item] of pending) {
+      if (item.client !== client) continue;
+      pending.delete(id);
+      clearTimeout(item.timer);
+      json(item.res, 503, { error: '扩展连接已解除或已切换；已派发操作结果不确定，请回读确认，勿直接重复提交。', code: 'EXTENSION_CONNECTION_CHANGED', outcome: 'unverified' });
+    }
+  };
   const deliver = () => {
     while (queue.length && !pending.has(queue[0].id)) queue.shift();
     if (!poll || !queue.length) return;
+    const item = pending.get(queue[0].id);
+    if (item.client !== poll.client) return;
     const current = poll;
     poll = null;
     clearTimeout(current.timer);
     const command = queue.shift();
+    item.recipient = current.client;
     log('command_deliver', { id: command.id, method: command.method, tabId: command.params?.tabId });
     json(current.res, 200, command);
   };
@@ -153,8 +177,8 @@ export function createBridge({ port = DEFAULT_PORT, host = '127.0.0.1', configDi
         if (origin && !isAllowed(origin)) return json(res, 403, { error: '来源未配对' });
         const lastSeenAgeMs = lastSeen ? Date.now() - lastSeen : null;
         return json(res, 200, {
-          connected: lastSeen > 0 && lastSeenAgeMs < 90000,
-          standby: lastSeen > 0 && lastSeenAgeMs >= staleAfterMs && lastSeenAgeMs < 90000,
+          connected: lastSeen > 0 && lastSeenAgeMs < leaseMs,
+          standby: lastSeen > 0 && lastSeenAgeMs >= staleAfterMs && lastSeenAgeMs < leaseMs,
           lastSeenAgeMs,
           lastSeen: lastSeen ? new Date(lastSeen).toISOString() : null,
           client: lastClient,
@@ -178,15 +202,17 @@ export function createBridge({ port = DEFAULT_PORT, host = '127.0.0.1', configDi
         const stale = lastSeenAgeMs >= staleAfterMs;
         if (pending.size >= 20) return json(res, 429, { error: '待处理指令过多' });
         const id = crypto.randomUUID();
-        const item = { res, timer: null, stale, method, started: Date.now() };
+        const item = { res, timer: null, stale, method, started: Date.now(), client: lastClient, recipient: null };
         log('command_queued', { id, method, tabId: params?.tabId, stale });
         pending.set(id, item);
         item.timer = setTimeout(() => {
           pending.delete(id);
           log('command_timeout', { id, method, durationMs: Date.now() - item.started });
-          json(res, stale ? 504 : 504, { error: stale
-            ? '扩展待机中（浏览器后台挂起），唤醒超时。点一下浏览器里的 AI Browser Control 扩展图标即可立即唤醒，然后重试。'
-            : '浏览器指令超时；操作结果不确定，请读取快照确认，勿直接重复提交。' });
+          const notDispatched = !item.recipient;
+          json(res, 504, { error: stale && notDispatched
+            ? '扩展待机中（浏览器后台挂起），唤醒超时；命令尚未派发。点一下浏览器里的 AI Browser Control 扩展图标唤醒后再试。'
+            : '浏览器指令超时；操作结果不确定，请读取快照确认，勿直接重复提交。',
+            code: notDispatched ? 'COMMAND_NOT_DISPATCHED' : 'COMMAND_TIMEOUT', outcome: notDispatched ? 'not-dispatched' : 'unverified' });
         }, stale ? rpcWaitWhenStaleMs : commandTimeout);
         res.on('close', () => {
           if (pending.has(id) && !res.writableEnded) log('command_client_closed', { id, method, durationMs: Date.now() - item.started });
@@ -210,6 +236,8 @@ export function createBridge({ port = DEFAULT_PORT, host = '127.0.0.1', configDi
         if (lastClient === `chrome-extension://${clientId}`) {
           lastSeen = 0;
           lastClient = null;
+          lease = null;
+          cancelClientCommands(`chrome-extension://${clientId}`);
           if (poll) { clearTimeout(poll.timer); poll.res.writeHead(204); poll.res.end(); poll = null; }
         }
         extensionVersions.delete(`chrome-extension://${clientId}`);
@@ -228,10 +256,11 @@ export function createBridge({ port = DEFAULT_PORT, host = '127.0.0.1', configDi
         return json(res, 200, { ok: true });
       }
       if (req.url === '/poll' && req.method === 'GET') {
-        if (poll) return json(res, 409, { error: '已有扩展连接正在等待；请只在一个浏览器配置文件中启用本扩展' });
-        lastSeen = Date.now();
-        lastClient = origin ?? `chrome-extension://${clientId}`;
-        const current = { res, timer: null };
+        const client = `chrome-extension://${clientId}`;
+        if (poll || (lease && lease.client !== client && leaseHeld())) return json(res, 409, { error: '已有活跃扩展占用命令通道；请先断开原扩展，或等待其连接租约到期' });
+        if (lease && lease.client !== client) cancelClientCommands(lease.client);
+        renewLease(client);
+        const current = { res, timer: null, client };
         poll = current;
         current.timer = setTimeout(() => { if (poll === current) poll = null; res.writeHead(204); res.end(); }, pollTimeout);
         res.on('close', () => { clearTimeout(current.timer); if (poll === current) poll = null; });
@@ -242,10 +271,17 @@ export function createBridge({ port = DEFAULT_PORT, host = '127.0.0.1', configDi
         const data = await readJson(req);
         const item = pending.get(data.id);
         if (!item) return json(res, 404, { error: '指令已过期或不存在' });
+        const client = `chrome-extension://${clientId}`;
+        if (item.recipient !== client) return json(res, 403, { error: '结果来源与指令接收扩展不匹配' });
+        renewLease(client);
         log('command_result', { id: data.id, method: item.method, outcome: data.error ? 'error' : 'ok', durationMs: Date.now() - item.started });
         pending.delete(data.id);
         clearTimeout(item.timer);
-        if (data.error) json(item.res, 502, { error: String(data.error.message ?? data.error), code: /^[A-Z_]{1,50}$/.test(data.error.code) ? data.error.code : 'BROWSER_ACTION_FAILED', outcome: 'unverified' });
+        if (data.error) {
+          const diagnostic = pageResultDiagnostic(data.error.diagnostic);
+          json(item.res, 502, { error: String(data.error.message ?? data.error), code: /^[A-Z_]{1,50}$/.test(data.error.code) ? data.error.code : 'BROWSER_ACTION_FAILED', outcome: 'unverified',
+            ...(diagnostic && Object.keys(diagnostic).length ? { diagnostic } : {}), commandId: data.id });
+        }
         else json(item.res, 200, { result: data.result });
         return json(res, 200, { ok: true });
       }
@@ -274,7 +310,7 @@ export function createBridge({ port = DEFAULT_PORT, host = '127.0.0.1', configDi
   };
 }
 
-export async function bridgeRequest(route, { port = DEFAULT_PORT, host = '127.0.0.1', token = '', body, timeout = 15000 } = {}) {
+export async function bridgeRequest(route, { port = DEFAULT_PORT, host = '127.0.0.1', token = '', body, timeout = Math.max(COMMAND_TIMEOUT_MS, RPC_WAIT_WHEN_STALE_MS) + RPC_RESPONSE_MARGIN_MS } = {}) {
   const response = await fetch(`http://${host}:${port}${route}`, {
     method: body === undefined ? 'GET' : 'POST',
     headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
@@ -282,7 +318,8 @@ export async function bridgeRequest(route, { port = DEFAULT_PORT, host = '127.0.
     signal: AbortSignal.timeout(timeout)
   });
   const data = await response.json();
-  if (!response.ok) throw Object.assign(new Error(data.error ?? `本机桥 HTTP ${response.status}`), { code: data.code || `BRIDGE_HTTP_${response.status}`, outcome: data.outcome });
+  if (!response.ok) throw Object.assign(new Error(data.error ?? `本机桥 HTTP ${response.status}`), { code: data.code || `BRIDGE_HTTP_${response.status}`, outcome: data.outcome,
+    diagnostic: pageResultDiagnostic(data.diagnostic), commandId: typeof data.commandId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(data.commandId) ? data.commandId : undefined });
   return data;
 }
 
@@ -295,7 +332,7 @@ export function ensureBridge(port = DEFAULT_PORT, options = {}) {
   return work;
 }
 
-async function ensureBridgeOnce(port, { host = '127.0.0.1', token = '' } = {}) {
+async function ensureBridgeOnce(port, { host = '127.0.0.1', token = '', configDir = bridgeDir(port) } = {}) {
   const headers = token ? { Authorization: `Bearer ${token}` } : {};
   const healthy = async () => {
     try {
@@ -312,14 +349,14 @@ async function ensureBridgeOnce(port, { host = '127.0.0.1', token = '' } = {}) {
   if (!isLoopbackAddress(host)) {
     throw new Error(`远端桥 ${host}:${port} 不可达或凭据不符。请在浏览器所在机器上启动：node server/bridge.mjs --bridge --port ${port} --host <网卡IP>；并核对 agent 配置里的 token 与防火墙设置。远端桥不会被本进程代拉。`);
   }
-  const dir = bridgeDir(port);
+  const dir = path.resolve(configDir);
   fs.mkdirSync(dir, { recursive: true });
-  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--bridge', '--port', String(port)], { detached: true, windowsHide: true, stdio: 'ignore' });
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--bridge', '--port', String(port), '--host', host, '--config-dir', dir], { detached: true, windowsHide: true, stdio: 'ignore' });
   child.on('error', () => {});
   child.unref();
   for (let attempt = 0; attempt < 30; attempt++) {
     await new Promise(resolve => setTimeout(resolve, 100));
-    try { await bridgeRequest('/status', { port, timeout: 500 }); return { launched: true, pid: child.pid }; } catch {}
+    try { await bridgeRequest('/status', { port, host, token, timeout: 500 }); return { launched: true, pid: child.pid }; } catch {}
   }
   throw new Error(`本机桥启动失败，请检查 ${path.join(dir, 'bridge.log')}`);
 }
@@ -334,7 +371,7 @@ if (isMain) {
       const port = Number.isInteger(portValue) && portValue > 0 && portValue < 65536 ? portValue : DEFAULT_PORT;
       const host = value('host') ?? '127.0.0.1';
       const allowedIps = process.argv.flatMap((a, i) => a === '--allow-ip' && process.argv[i + 1] ? [process.argv[i + 1]] : []);
-      const bridge = createBridge({ port, host, allowedIps });
+      const bridge = createBridge({ port, host, allowedIps, configDir: value('config-dir') ?? bridgeDir(port) });
       await bridge.start();
       const exposed = host === '127.0.0.1' ? '仅本机' : `已对 ${host} 开放（远程访问必须携带 token）`;
       if (process.stdout.isTTY) {
@@ -356,7 +393,9 @@ if (isMain) {
       const index = process.argv.indexOf('--port');
       const value = Number(process.argv[index + 1]);
       const port = index >= 0 && Number.isInteger(value) && value > 0 && value < 65536 ? value : DEFAULT_PORT;
-      createLogger(bridgeDir(port))('bridge_start_failed', { version: VERSION, code: /^[A-Z0-9_]{1,40}$/.test(error.code) ? error.code : 'UNKNOWN' });
+      const configIndex = process.argv.indexOf('--config-dir');
+      const configDir = configIndex >= 0 ? process.argv[configIndex + 1] : bridgeDir(port);
+      createLogger(configDir)('bridge_start_failed', { version: VERSION, code: /^[A-Z0-9_]{1,40}$/.test(error.code) ? error.code : 'UNKNOWN' });
     }
     if (!process.argv.includes('--bridge') || process.stderr.isTTY) console.error(error.message);
     process.exitCode = 1;

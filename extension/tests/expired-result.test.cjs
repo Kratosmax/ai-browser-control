@@ -5,60 +5,100 @@ const path = require('node:path');
 const vm = require('node:vm');
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const tick = () => new Promise(resolve => setImmediate(resolve));
 
-// 命令12秒过期或结果已被桥消费后，404不能卡住后续轮询，也不能重复执行动作。
-test('/result 404 丢弃过期结果，继续 poll；重复 id 不重执行', async () => {
+// 全部传输在VM内模拟，不启动浏览器或连接默认桥。
+function deliveryHarness({ status = 200, actionResult = { clicked: true } } = {}) {
   const event = { addListener() {} };
-  let pairs = 0;
-  let polls = 0;
-  let posts = 0;
-  let actions = 0;
+  const stats = { pairs: 0, polls: 0, actions: 0, posts: [] };
   const timers = new Map();
   let timerId = 0;
-  const source = fs.readFileSync(path.resolve(__dirname, '../background.js'), 'utf8');
   const context = vm.createContext({
-    URL, AbortController,
-    // 假定时器：意外错误的重试 sleep 停在假计时器上，避免真实事件循环挂起。
+    URL, AbortController, TextEncoder,
     setTimeout: (fn, ms) => { const id = ++timerId; timers.set(id, { fn, ms }); return id; },
-    clearTimeout: (id) => timers.delete(id),
+    clearTimeout: id => timers.delete(id),
     chrome: {
       storage: { session: { get: async () => ({}), set: async () => {} }, local: { get: async () => ({}), set: async () => {}, remove: async () => {} } },
-      runtime: {
-        onMessage: event, onInstalled: event, onStartup: event,
-        getManifest: () => ({ name: 'AI Browser Control' })
-      },
+      runtime: { onMessage: event, onInstalled: event, onStartup: event, getManifest: () => ({ name: 'AI Browser Control' }) },
       debugger: { onDetach: event }, tabs: { onRemoved: event },
       alarms: { create: async () => {}, onAlarm: event }
     },
-    countAction: () => { actions++; },
+    countAction: () => { stats.actions++; return actionResult; },
     fetch: async (url, options) => {
       if (url.endsWith('/diagnostics')) return { ok: true, status: 200, body: { cancel: async () => {} } };
-      if (url.endsWith('/pair')) { pairs++; return { ok: true, status: 200, body: { cancel: async () => {} } }; }
+      if (url.endsWith('/pair')) { stats.pairs++; return { ok: true, status: 200, body: { cancel: async () => {} } }; }
       if (url.endsWith('/result')) {
-        posts++;
-        return { ok: false, status: 404, body: { cancel: async () => {} } };
+        stats.posts.push({ payload: JSON.parse(options.body), bytes: Buffer.byteLength(options.body, 'utf8') });
+        return { ok: status < 400, status, body: { cancel: async () => {} } };
       }
-      polls++;
-      if (polls <= 2) return {
+      stats.polls++;
+      if (stats.polls <= 2) return {
         ok: true, status: 200,
-        json: async () => ({ id: 'expired-command', method: 'click', params: { tabId: 7 } })
+        json: async () => ({ id: 'same-command', method: 'click', params: { tabId: 7 } })
       };
       return new Promise((resolve, reject) => {
         options.signal.addEventListener('abort', () => reject(new Error('aborted')));
       });
     }
   });
-  context.importScripts = name => vm.runInContext(fs.readFileSync(path.resolve(__dirname, '..', name), 'utf8'), context);
-  vm.runInContext(source, context);
+  const run = code => vm.runInContext(code, context);
+  context.importScripts = name => run(fs.readFileSync(path.resolve(__dirname, '..', name), 'utf8'));
+  run(fs.readFileSync(path.resolve(__dirname, '../background.js'), 'utf8'));
   // 此用例仅验证协议控制流，实际动作在mock.test.cjs另行覆盖。
-  vm.runInContext('execute = async () => { countAction(); return {clicked: true}; };', context);
-  const run = (code) => vm.runInContext(code, context);
-  // 后台循环自启动：配对一次，取到同一条命令两次，动作只执行一次，404 两次后回到 poll。
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(pairs, 1);
-  assert.equal(polls, 3);
-  assert.equal(posts, 2);
-  assert.equal(actions, 1);
-  assert.equal(run('pendingResult'), null);
-  assert(timers.size > 0, '最终停在 poll 等待或重试定时器上，不应退出循环');
+  run('execute = async () => countAction();');
+  return { stats, timers, run };
+}
+
+test('/result 404丢弃过期结果继续poll；相同id不重执行', async () => {
+  const h = deliveryHarness({ status: 404 });
+  await tick();
+  assert.equal(h.stats.pairs, 1);
+  assert.equal(h.stats.polls, 3);
+  assert.equal(h.stats.posts.length, 2);
+  assert.equal(h.stats.actions, 1);
+  assert.equal(h.run('pendingResult'), null);
+  assert(h.timers.size > 0);
+});
+
+for (const status of [400, 413, 415, 422]) {
+  test('/result HTTP ' + status + '仅回报一次小错误；再次拒绝后继续poll，不重放动作', async () => {
+    const h = deliveryHarness({ status });
+    await tick();
+    assert.equal(h.stats.polls, 3);
+    assert.equal(h.stats.actions, 1);
+    assert.equal(h.stats.posts.length, 3);
+    assert.equal(h.stats.posts[0].payload.result.clicked, true);
+    for (const post of h.stats.posts.slice(1)) {
+      assert.equal(post.payload.error.code, 'RESULT_REJECTED');
+      assert(post.bytes < 1024);
+    }
+    assert.equal(h.run('pendingResult'), null);
+  });
+}
+
+for (const [name, actionResult] of [
+  ['单张PNG超过12MiB', { data: 'A'.repeat(13 * 1024 * 1024), mimeType: 'image/png' }],
+  ['非ASCII字符数小但UTF-8字节超限', { text: '汉'.repeat(4 * 1024 * 1024) }]
+]) {
+  test(name + '改报RESULT_TOO_LARGE，正常上报并继续poll，不重放动作', async () => {
+    const h = deliveryHarness({ actionResult });
+    await tick();
+    assert.equal(h.stats.polls, 3);
+    assert.equal(h.stats.actions, 1);
+    assert.equal(h.stats.posts.length, 2);
+    for (const post of h.stats.posts) {
+      assert.equal(post.payload.error.code, 'RESULT_TOO_LARGE');
+      assert(post.bytes < 1024);
+    }
+    assert.equal(h.run('pendingResult'), null);
+  });
+}
+
+test('接近10MiB但封装后仍在预算内的截图正常保留', async () => {
+  const h = deliveryHarness({ actionResult: { data: 'A'.repeat(10 * 1024 * 1024 - 256), mimeType: 'image/png' } });
+  await tick();
+  assert.equal(h.stats.actions, 1);
+  assert.equal(h.stats.polls, 3);
+  assert.equal(h.stats.posts[0].payload.result.mimeType, 'image/png');
+  assert(h.stats.posts[0].bytes <= 10 * 1024 * 1024);
 });

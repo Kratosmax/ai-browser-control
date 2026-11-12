@@ -21,10 +21,18 @@
 - `loading.stopReason`：`bottom-stable` 只是底部暂时稳定；`time-budget` / `step-budget` 表示尚需继续；`blocked-by-dialog` 表示被识别的弹窗阻塞；`no-scroll-area` 不证明业务列表已完整。
 - `loading.end`：当轮末端的滚动高度、位置和 `textTail`，可辅助读取被正文上限截掉的末尾内容。
 - `loading.observed`：当轮累计观察到的控件及上下文。没有可点击 ref；不是结构化的全部业务记录，也不会跨调用自动累计。
-- `loading.observationsTruncated`、`coverage.textTruncated`、`coverage.elementScanLimited`：任一截断都不能据返回条数推算页面业务总数。150是控件上限，不是记录数。
+- `loading.observationsTruncated`、`coverage.textTruncated`、`coverage.elementScanLimited`：任一截断都不能据返回条数推算页面业务总数。150是单批控件上限；pagination.total是本轮已加载匹配控件数，不是业务记录数。
 - `coverage.dataCompleteness=unknown`、`loading.complete=false`：工具不会替 agent 判断业务全量。页面 `readyState=complete` 仅说明文档状态。
 
-当前默认预算约8秒/40轮；累计观察最多300条/24000字符，正文最多12000字符，交互元素最多150个。以后版本以工具实际返回的 limits 为准。
+当前默认探测预算约8秒/40轮；累计观察最多300条/24000字符，正文每批最多12000字符，交互元素每批最多150个。查询/分页与网站自身的数据分页是两层，不把未加载数据算进工具total。以后版本以实际返回limits为准。
+
+## 查已知目标与继续工具分页
+
+- 已知目标如“下载”，先`browser_snapshot(tabId,load="current",name="下载",role="button",exact=true)`，有同名结果补context或scope，不必遍历全部导航。匹配候选位于原150之后也可返回ref。
+- 相关区域可用scope=main/dialog/viewport；已有容器ref时用scopeRef，不能和scope混用。范围不存在/没有匹配返回空不等业务无数据。
+- 需遍历同一轮候选，保存pagination.nextCursor，再`browser_snapshot(tabId,cursor=...)`；续页可换format，不能换筛选/limit或调用load=auto。各批snapshotId一致、refs保持稳定。
+- SNAPSHOT_CHANGED表示相关节点/顺序/身份已变，停止拼接并重新查找；STALE_CURSOR表示游标失效。不要因为错误去重试业务点击。同轮取得的ref仍需动作时身份核验。
+- cursor只覆盖当前已加载候选；网站滚动/加载更多后建立新轮。不能把工具hasMore=false当作网站没有更多记录。
 
 ## 按真实页面继续遍历
 
@@ -55,6 +63,6 @@
 2. 如果 context 包含了多条记录、缺少关键字段或匹配多个候选，重新定位、滚动并截图核对；仍不能区分时明确未定位，不能强行点击。
 3. 重新 `snapshot(load="current")`，找到当前 ref，点击时传 `expectedContext`。它检查文本包含关系，不能替代唯一性判断；滚动/动画中的身份变化或遮挡错误应先回读处理。
 4. `clicked=true` / `actionDispatched=true`、`outcome=unverified` 只说明事件派发。随后快照核对**同一业务身份**与用户要的结果：同一记录展开内容、正确详情页ID、指定字段新值等，必要时截图。页面变化、按钮数量变化、多个“收起”都不能单独证明点对了。
-5. 出错或超时先回读原目标状态。确认没有发生动作后才有依据地修正定位；结果未知的提交/支付/删除不重复执行。列表排序在动作前改变时，先重新判断“最后/第N项”，不要继续用旧身份代表新排名。
+5. 正常定位/页面语义错误按可用工具核对原目标；连接/注入/空回传/内部异常或超时导致能力不可用时，首次立即停止并按[故障交接](failure-reporting.md)报告，不继续反复回读。确认没有发生动作后才有依据地修正定位；结果未知的提交/支付/删除不重复执行。列表排序在动作前改变时，先重新判断“最后/第N项”，不要继续用旧身份代表新排名。
 
 报告记录已覆盖的查询范围、结束依据、目标身份和验证结果；缺少哪一项就直说。技能不保证每个网站都能取全，也不为读取列表自动更改CDP、权限、登录或筛选条件。

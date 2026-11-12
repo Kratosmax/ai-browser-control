@@ -10,6 +10,8 @@
 
 0.12.0共20个工具，新增browser_task与browser_batch；open新增必填taskId/taskName及可选reuseKey/reuse，输入工具支持mode=auto/dom/cdp。旧目录的open(url)需要重连接入新版定义，避免继续创建无任务归属页。接入时必须随同加载仓库skills/ai-browser-control/SKILL.md，任务分组、复用、收尾清理与截图复查规范见其[任务参考](skills/ai-browser-control/references/tasks-and-verification.md)。客户端无法自动传递聊天名/完成事件时，由agent显式传taskName和finish，不假装协议能识别任务结算。
 
+0.13.0调整清理规则：只清理AI创建或有可靠浏览器导航来源链的连带页面，且当前仍在目标任务分组；finish表示agent评估操作结束，cleanup仅用于数量超限。满足三项时允许关闭活动或已编辑页，显式keep仍保留。不能沿用旧技能中“表单修改一律跳过”的规则；更新后重连读取最新工具说明与任务参考。
+
 本地MCP启动即检查桥，存活期间每5秒检查，失败退避上限60秒；扩展也按其退避周期重连。远端桥不代拉，退出全部宿主后不保证保活；监督恢复不重放浏览器动作。升级后需重载扩展（新增tabGroups权限用于分组）并按客户端方式重连MCP，核对两端实际版本，不能把源码更新当成已加载新版。
 
 1. 查明现有 Node.js 22+ 的绝对路径和仓库绝对路径。
@@ -18,6 +20,12 @@
 4. 明确目标浏览器对应的桥端口；单浏览器默认 17653。多个浏览器分别配置不同端口。
 
 不要把仓库示例中的 Windows 路径或配置键原样套给其他平台/客户端。
+
+0.14.0共21个工具，新增browser_restart（空参数）。MCP使用稳定stdio启动器与可重载工作进程：agent更新磁盘文件后可发起重载，工作进程就绪才切换，失败保留旧进程；支持tools.listChanged通知，客户端应按通知重新读取目录。browser_status的mcpVersion/mcpPid/mcpGeneration与磁盘版本提示表示MCP实际状态，不与桥version或extensionVersion混用。首次安装旧进程尚无该工具，需要MCP管理重连一次；之后更新工作进程可直接调用，启动器自身更新仍需宿主重连。
+
+0.15.0扩展browser_task而不增加工具数量：close+tabIds表示仅结束所选页面的操作，任务其他部分继续；unkeep解除已保留页；adopt+taskName+pages为有真实创建记录的旧AI页补登记。pages逐项给tabId/url/groupId/evidence:{kind,reference}；声明保存为agent-attested，不推断历史。按closedCount回报实际关闭数；工具无报错但closed为空不等于清理成功。更新后需重载扩展并用browser_restart刷新MCP定义，无法刷新目录的宿主重连。
+
+0.16.0仍21个工具，扩展snapshot参数name/role/exact/context、scope或scopeRef、cursor/limit；150仅每批返回数。pagination同轮refs稳定，相关候选变化报SNAPSHOT_CHANGED，新快照使旧cursor失效。compact格式保留，MCP仅移除format再透传其他查询参数。扩展page-agent代际8；部署后须重载扩展以生效，MCP重载仅刷新其定义。
 
 ## 2. 启动契约
 

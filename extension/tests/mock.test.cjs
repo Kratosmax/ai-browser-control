@@ -10,7 +10,7 @@ const root = path.resolve(__dirname, '..');
 const source = (name) => fs.readFileSync(path.join(root, name), 'utf8');
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
-function backgroundHarness(stored = { cdpEnabled: true, screenshotCdpEnabled: true }) {
+function backgroundHarness(stored = { cdpEnabled: true, screenshotCdpEnabled: true }, session = {}) {
   const calls = [];
   const listeners = {};
   const timers = new Map();
@@ -23,7 +23,7 @@ function backgroundHarness(stored = { cdpEnabled: true, screenshotCdpEnabled: tr
   let diagnosticFetch = async () => ({ ok: true, status: 200, body: { cancel: async () => {} } });
   let timerId = 0;
   const chrome = {
-    storage: { session: { get: async () => ({}), set: async () => {} }, local: {
+    storage: { session: { get: async () => structuredClone(session), set: async data => { Object.assign(session, structuredClone(data)); } }, local: {
       get: async () => stored, set: async (data) => calls.push(['store', data]), remove: async () => {}
     } },
     runtime: {
@@ -42,10 +42,10 @@ function backgroundHarness(stored = { cdpEnabled: true, screenshotCdpEnabled: tr
       captureVisibleTab: async (windowId) => { calls.push(['capture', windowId]); return 'data:image/png;base64,PNG'; },
       get: async (id) => {
         const tab = tabs.find((item) => item.id === id);
-        if (!tab) throw new Error('missing');
+        if (!tab) throw new Error('No tab with id: ' + id);
         return tab;
       },
-      update: async (id, params) => calls.push(['update', id, params]), onRemoved: event('removed')
+      update: async (id, params) => calls.push(['update', id, params]), onCreated: event('created'), onRemoved: event('removed')
     },
     windows: { get: async (id) => ({ id, focused: false }), getLastFocused: async (params) => { calls.push(['lastWindow', params]); return { id: 1 }; } },
     tabGroups: { update: async () => {} },
@@ -63,11 +63,11 @@ function backgroundHarness(stored = { cdpEnabled: true, screenshotCdpEnabled: tr
       if (spec.files) return [{ result: undefined }];
       const result = spec.args[0] === 'prepare' ? { x: 20, y: 30 } :
         spec.args[0] === 'snapshot' ? { title: 'test', elements: [] } : { focused: true };
-      return [{ result }];
+      return [{ frameId: 0, result: { protocol: 'ai-browser-page-rpc-v1', ok: true, payload: result, diagnostic: { stage: 'serialize', agentPresent: true, resultKind: 'object' } } }];
     } }
   };
   const context = vm.createContext({
-    chrome, URL, AbortController,
+    chrome, URL, AbortController, TextEncoder,
     setTimeout: (fn, ms) => { const id = ++timerId; timers.set(id, { fn, ms }); return id; },
     clearTimeout: (id) => timers.delete(id),
     fetch: (...args) => {
@@ -87,6 +87,32 @@ function backgroundHarness(stored = { cdpEnabled: true, screenshotCdpEnabled: tr
     diagnosticFetch: (fn) => { diagnosticFetch = fn; }
   };
 }
+
+test('后台task直接入口支持恢复归属、选择性unkeep/close，列表暴露证据且零页不能假报成功', async () => {
+  const h = backgroundHarness({ disconnected: true });
+  await tick();
+  const actual = await h.run('chrome.tabs.query({})');
+  actual[0].groupId = 19;
+  const receipt = await h.run("execute({method:'task',params:{action:'adopt',taskId:'recovery',taskName:'恢复测试',pages:[{tabId:7,url:'https://example.test/',groupId:19,evidence:{kind:'agent-created',reference:'session:mock/create:7'}}]}})");
+  assert.deepEqual([...receipt.adopted], [7]);
+  const tabs = await h.run('listTabs()');
+  const adopted = tabs.find(tab => tab.id === 7);
+  assert.equal(adopted.managed, true);
+  assert.equal(adopted.provenance, 'agent-attested');
+  assert.equal(adopted.evidence.reference, 'session:mock/create:7');
+  await h.run("execute({method:'task',params:{action:'keep',taskId:'recovery',keepTabIds:[7]}})");
+  const kept = await h.run("execute({method:'task',params:{action:'close',taskId:'recovery',tabIds:[7]}})");
+  assert.equal(kept.closedCount, 0);
+  assert.equal(kept.requestedCount, 1);
+  assert(kept.verificationRequired);
+  assert(!kept.summary.includes('完成清理'));
+  await h.run("execute({method:'task',params:{action:'unkeep',taskId:'recovery',tabIds:[7]}})");
+  const closed = await h.run("execute({method:'task',params:{action:'close',taskId:'recovery',tabIds:[7]}})");
+  assert.deepEqual([...closed.closed], [7]);
+  assert.equal(closed.closedCount, 1);
+  assert(!(await h.run('chrome.tabs.query({})')).some(tab => tab.id === 7));
+  await assert.rejects(h.run("execute({method:'task',params:{action:'close',taskId:'recovery',tabIds:[]}})"), { code: 'INVALID_PARAMS' });
+});
 
 test('诊断环形记录有数量与字节上限，保留最新事件，存储后可跨worker恢复', async () => {
   const h = backgroundHarness({ disconnected: true });
@@ -197,7 +223,8 @@ test('打开网址后台创建，不调用窗口激活，显式窗口继承原�
   await assert.rejects(h.run("execute({method:'open',params:{url:'https://example.test/new',tabId:7}})"), /授权/);
   await h.run("handlePopup({type:'authorize_tab',tabId:7})");
   await h.run("execute({method:'open',params:{url:'https://example.test/new',tabId:7}})");
-  assert.equal(h.calls.filter(c => c[0] === 'create').at(-1)[1].openerTabId, 7);
+  assert.equal(h.calls.filter(c => c[0] === 'create').at(-1)[1].windowId, 1);
+  assert.equal(h.calls.filter(c => c[0] === 'create').at(-1)[1].openerTabId, undefined, '显式open不伪装成网页派生链');
   h.run("chrome.windows.getLastFocused=async()=>{throw new Error('none')}");
   const count = h.calls.filter(c => c[0] === 'create').length;
   await assert.rejects(h.run("execute({method:'open',params:{url:'https://example.test/new'}})"), { code: 'NO_BROWSER_WINDOW' });
@@ -530,7 +557,7 @@ function pageHarness() {
   return {
     document, Element, HTMLInputElement, HTMLTextAreaElement,
     setNodes: (items) => { nodes = items; }, inject,
-    get agent() { return context.__aiBrowserPageAgent7; }
+    get agent() { return context.__aiBrowserPageAgent8; }
   };
 }
 
@@ -549,8 +576,10 @@ test('页面快照上限、隐藏过滤、密码保密、重复注入保留refs�
   assert.equal(first.coverage.scope, 'loaded-dom');
   assert.equal(first.coverage.dataCompleteness, 'unknown');
   assert.equal(first.coverage.textTruncated, true);
-  assert.equal(first.coverage.elementScanLimited, true);
-  assert(first.coverage.scannedCandidates < first.coverage.candidateCount);
+  assert.equal(first.coverage.elementScanLimited, false);
+  assert.equal(first.coverage.scannedCandidates, first.coverage.candidateCount);
+  assert(first.pagination.hasMore);
+  assert(first.pagination.total > first.elements.length);
   assert.equal(first.elements[0].value, '文本');
   assert(!Object.hasOwn(first.elements[1], 'value'));
   assert(!JSON.stringify(first).includes('SECRET'));
@@ -585,7 +614,7 @@ test('页面代理返回 null 或携带 error 时，报告真实原因而非解�
   let timerId = 0;
   const source = fs.readFileSync(path.join(root, 'background.js'), 'utf8');
   const context = vm.createContext({
-    URL, AbortController,
+    URL, AbortController, TextEncoder,
     // 假定时器：无 fetch 时后台重试的 sleep 停在假计时器上，避免真实事件循环挂起。
     setTimeout: (fn, ms) => { const id = ++timerId; timers.set(id, { fn, ms }); return id; },
     clearTimeout: (id) => timers.delete(id),
@@ -608,7 +637,7 @@ test('页面代理返回 null 或携带 error 时，报告真实原因而非解�
   const run = (code) => vm.runInContext(code, context);
   await tick();
   await run("handlePopup({type:'authorize_tab',tabId:7})");
-  await assert.rejects(run("execute({method:'click',params:{tabId:7,ref:'r1-1'}})"), /页面代理未返回结果/);
+  await assert.rejects(run("execute({method:'click',params:{tabId:7,ref:'r1-1'}})"), error => error.code === 'PAGE_AGENT_EMPTY_RESULT' && error.diagnostic.resultKind === 'null' && !/遮挡|不可见/.test(error.message));
   mode = 'error';
   await assert.rejects(run("execute({method:'snapshot',params:{tabId:7}})"), /目标中心被其他元素遮挡/);
 });
@@ -628,7 +657,9 @@ test('长列表不会挤掉当前弹窗按钮，保留控件仍按 DOM 顺序输
   assert.equal(snap.elements.at(-1).name, '我知道了');
   assert.equal(snap.elements[0].name, '航班 0');
   assert.equal(snap.coverage.selectionPriority, 'viewport-first');
-  assert.equal(snap.coverage.elementScanLimited, true);
+  assert.equal(snap.coverage.elementScanLimited, false);
+  assert(snap.pagination.hasMore);
+  assert.equal(snap.pagination.total, 181);
   const point = await h.agent.prepare(snap.elements.at(-1).ref);
   assert.equal(point.x, 60);
 });
@@ -857,6 +888,79 @@ test('桥端口可配置、失败按指数退避、成功归零', async () => {
   assert(!msValues().includes(32000) && !msValues().includes(16000));
 });
 
+test('release和用户取消调试的撤权跨worker恢复，手动重新授权与关页清除会话记录', async () => {
+  for (const cause of ['release', 'user-detach']) {
+    const session = {};
+    const settings = { autoAuthorize: true, cdpEnabled: true, disconnected: true };
+    const h = backgroundHarness(settings, session);
+    await tick();
+    if (cause === 'release') await h.run("execute({method:'release',params:{tabId:7}})");
+    else { h.listeners.detach({ tabId: 7 }); await tick(); }
+    assert.deepEqual(session.revokedTabIds, [7]);
+    const restored = backgroundHarness(settings, session);
+    await tick();
+    assert.equal((await restored.run("execute({method:'list_tabs'})"))[0].authorized, false);
+    await assert.rejects(restored.run("execute({method:'screenshot',params:{tabId:7}})"), /已释放/);
+    assert(!restored.calls.some(call => call[0] === 'attach'));
+    await restored.run("handlePopup({type:'authorize_tab',tabId:7})");
+    assert.deepEqual(session.revokedTabIds, []);
+    await restored.run("execute({method:'snapshot',params:{tabId:7}})");
+    restored.listeners.detach({ tabId: 7 }); await tick();
+    restored.listeners.removed(7); await tick();
+    assert.deepEqual(session.revokedTabIds, []);
+  }
+});
+
+test('attach待决时关闭输入或截图开关，迟到附加被解除且不派发CDP', async () => {
+  for (const purpose of ['input', 'screenshot']) {
+    const h = backgroundHarness({ autoAuthorize: true, cdpEnabled: true, screenshotCdpEnabled: true, disconnected: true });
+    await tick();
+    h.run('let resumeAttach; chrome.debugger.attach=()=>new Promise(done=>resumeAttach=done)');
+    const action = h.run(purpose === 'input'
+      ? "execute({method:'click',params:{tabId:7,ref:'r1-1',mode:'cdp'}})"
+      : "execute({method:'screenshot',params:{tabId:7}})");
+    const rejected = assert.rejects(action, /已关闭|授权已变化/);
+    await tick();
+    assert.equal(h.run('typeof resumeAttach'), 'function');
+    await h.run(purpose === 'input'
+      ? "handlePopup({type:'set_cdp_enabled',enabled:false})"
+      : "handlePopup({type:'set_screenshot_cdp_enabled',enabled:false})");
+    // 关闭后重新打开也不能让旧附加获得新一代授权。
+    await h.run(purpose === 'input'
+      ? "handlePopup({type:'set_cdp_enabled',enabled:true})"
+      : "handlePopup({type:'set_screenshot_cdp_enabled',enabled:true})");
+    h.run('resumeAttach()');
+    await rejected;
+    assert.equal(h.run('attached.size'), 0);
+    assert(h.calls.some(call => call[0] === 'detach'));
+    assert(!h.calls.some(call => call[0] === 'cdp'));
+  }
+});
+
+test('attach待决时用户取消调试，迟到结果不能绕过撤权发送命令', async () => {
+  const session = {};
+  const h = backgroundHarness({ autoAuthorize: true, screenshotCdpEnabled: true, disconnected: true }, session);
+  await tick();
+  h.run('let resumeAttach; chrome.debugger.attach=()=>new Promise(done=>resumeAttach=done)');
+  const action = h.run("execute({method:'screenshot',params:{tabId:7}})");
+  const rejected = assert.rejects(action, /已释放|授权已变化/);
+  await tick();
+  h.listeners.detach({ tabId: 7 });
+  h.run('resumeAttach()');
+  await rejected;
+  assert(!h.calls.some(call => call[0] === 'cdp'));
+  assert.deepEqual(session.revokedTabIds, [7]);
+});
+
+test('批次按UTF-8字节保留可接受结果，非ASCII大项不挤掉其他项', async () => {
+  const h = backgroundHarness({ disconnected: true }); await tick();
+  h.run("executeBounded=async command=>command.params.tabId===7?{text:'汉'.repeat(4*1024*1024)}:{title:'small'}");
+  const batch = await h.run("execute({method:'batch',params:{commands:[{method:'snapshot',params:{tabId:7}},{method:'snapshot',params:{tabId:8}}]}})");
+  assert.equal(batch.results[0].ok, false);
+  assert.equal(batch.results[0].error.code, 'RESULT_TOO_LARGE');
+  assert.equal(batch.results[1].result.title, 'small');
+});
+
 test('MV3 清单含图标、popup 无内联脚本且引用自动授权开关', () => {
   const manifest = JSON.parse(source('manifest.json'));
   assert.equal(manifest.manifest_version, 3);
@@ -881,4 +985,16 @@ test('MV3 清单含图标、popup 无内联脚本且引用自动授权开关', (
   assert(popupJs.includes("getElementById('auto-authorize')"));
   assert(popupJs.includes('set_bridge_port'));
   assert(!popupJs.includes('token'));
+});
+
+test('目标查询和游标续页参数完整透传，续页不自动探测', async () => {
+  const h = backgroundHarness({ autoAuthorize: true, disconnected: true });
+  await tick();
+  const params = { tabId: 7, load: 'current', name: '下载', role: 'button', exact: true, context: '账单', scope: 'main', limit: 25 };
+  await h.run('execute(' + JSON.stringify({ method: 'snapshot', params }) + ')');
+  const query = h.calls.filter(call => call[0] === 'script' && call[1].args?.[0] === 'snapshot').at(-1)[1].args[1];
+  assert.deepEqual(JSON.parse(JSON.stringify(query)), { load: 'current', name: '下载', role: 'button', context: '账单', exact: true, scope: 'main', limit: 25 });
+  await h.run('execute(' + JSON.stringify({ method: 'snapshot', params: { tabId: 7, cursor: 'opaque' } }) + ')');
+  const continued = h.calls.filter(call => call[0] === 'script' && call[1].args?.[0] === 'snapshot').at(-1)[1].args[1];
+  assert.deepEqual(JSON.parse(JSON.stringify(continued)), { load: 'current', cursor: 'opaque' });
 });

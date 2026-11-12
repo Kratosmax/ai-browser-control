@@ -1,5 +1,64 @@
 # 验证记录
 
+## 2026-11-12：0.16.1源码交付与主动批量规则
+
+- 本次提交汇总此前已验收的0.13.0至0.16.1改动：任务页按页结束与补登记、MCP工作进程重载、目标查询/区域读取/稳定分页、页面RPC诊断及首次故障交接。下方“未推送”等为对应阶段的历史状态；本次仅同步现有仓库源码，不创建标签或GitHub Release。
+- 主skill消除“一次执行一个动作”的跨页歧义，每轮检查是否有至少两页已就绪且互不影响的步骤；符合时优先browser_batch，每批最多4页，不等凑满。同页依赖、共享状态修改与能力限制仍按顺序或正式单工具处理，批量不扩大业务授权；一页未就绪不拖住其它独立页。源skill、实际插件与用户独立skill对应文件hash一致，UTF-8无BOM；现有协议5项测试通过。
+- 本次提交前重新运行完整Node回归248/248通过，无失败或跳过；此前真实Edge生命周期20项、原扩展18项通过。本次仅增加规则及工具说明，未改变浏览器执行逻辑。磁盘同步、GitHub源码同步与运行中加载分开判断；原业务空回传根因仍未确认，不以源码交付声称账票业务恢复。
+
+## 2026-11-12：0.16.1页面RPC空回传与首次故障交接
+
+- 用户提供15:02:20火山/抖店读取失败现场。原始诊断3JSON+manifest已只读读取，未修改业务证据。维护会话仅对原火山tab1891454153执行一次load=current/name=下载/role=button只读复核，旧错误仍可复现；事前MCP/桥/扩展均0.16.0、授权正常，未下载/开票/提交或重载现场。
+- 独立最小MV3+临时Edge157.0.4341.46+loopback完成37个真实executeScript探针：sync/async throw、Promise.reject、files顶层异常都可能API resolve/result:null无error；普通Promise及真实page-agent8 snapshot current/auto正常。导航缺代理、不兼容truthy代理、不可序列化顶层值均可同形失败。证实旧错误解释与观测不足，但现场具体底层触发原因仍未确定，不把导航/遮挡/网站/登录/Promise推成事实。证据temp/task19-execute-script/probe.py/report.json，维护报告temp/qa/v0161/incident-report.md。
+- 真正执行的func改显式async/try/await固定RPC信封，捕获lookup/缺方法/sync throw/rejection/序列化失败；注入API返回只记录元数据，不假称代理ready。空null/undefined、无result/空数组、错误shape、document/frame不一致分别分类。Chrome提供documentId时调用绑定注入文档，文档消失不向新文档重试。兼容agent8和原方法参数，不改变CDP设置，不自动重放读写动作。
+- page_result按commandId关联，日志仅固定类型、阶段、计数、布尔一致性和异常类别；桥与MCP透传安全diagnostic/commandId，纯text宿主同样可见固定诊断。独立审查指出仅用大写正则过滤errorCode可能写入合法字符敏感串，已改固定已知集合；批量子项原丢诊断，已补安全diagnostic和子ID，并有反例。
+- 浏览器skill新增failure-reporting.md：业务agent首次发现插件不可用即停止业务并先通知，再一次性报告首错、实际版本、tabId/命令ID、已知阶段、未证实原因、证据路径和业务待办；只复用现有证据，必要时至多各一次status/list，不换参数/入口重试，不先要求重载碰运气，不假称自动跨会话通知。正常结构化空DOM/无匹配/STALE_REF/SNAPSHOT_CHANGED等按各自文档处理。明确维护排障授权例外，不妨碍本维护会话保全现场后隔离诊断。修正主skill和其他参考中“故障后继续回读”的局部冲突。
+- 首轮完整Node245/245通过；补诊断隐私/批量反例后最终全量 **248/248通过**。真实Edge生命周期 **20/20通过**，原扩展端到端 **18/18通过**，包含实际Chrome边界异常null的解码、缺代理明确NOT_READY、错误code+诊断+命令ID经真实桥/MCP回传、一次失败不重放、恢复对照成功。独立审查结果、最终Node及原扩展回归结果和安装hash另记录在temp/qa/v0161/。
+- 0.16.1是诊断与防护修复，不宣称现场账票已恢复/已下载，或历史根因已确定。实际安装插件目录、用户独立skill须同步核验；浏览器仍加载0.16.0时明确尚未生效，不擅自通过重载破坏故障现场。未提交推送或Release。
+
+## 2026-11-11：0.16.0目标查找、区域读取与稳定分页
+
+- 用户认可150应限制每批返回量而非全页可操作元素总数。snapshot新增name/role/context/exact目标过滤，scope=all/main/dialog/viewport或scopeRef容器；查询扫描当前已加载候选而非仅前150。role和名称精确匹配区分同名控件，业务上下文与原动作身份守卫保留。默认full与已有compact输出均保留。
+- pagination包含snapshotId/offset/limit/total/hasMore/nextCursor。一个最新轮次完整候选缓存，150仅单批上限；续页不探测加载、不改变筛选、不刷新generation，同轮前批refs继续有效。续页重新比对匹配节点顺序/身份/可见性等，变化SNAPSHOT_CHANGED；新快照/导航使旧cursor失效。total和hasMore仅针对当前已加载匹配候选，不能当成网站业务全量。
+- 常驻nav/menu、普通select/listbox不自动作为弹出菜单高优先级，关联trigger或浮动定位等证据用于popup。嵌套同一动作li/button/span收敛，独立同名按钮仍分别保留；main/dialog等区域ref保留，区域名称来自显式标签而不把整段后代正文作为名称。page-agent升级8，与background及相关直接注入测试同步。
+- 独立snapshot-query.test.cjs首批30/30通过，独立审查后补至 **34/34通过**，含1600候选末端offscreen查找、11页无重漏、跨页refs、区域/容器、节点替换/复用/增删重排/隐藏变化、无关装饰变化、导航/旧游标、菜单和密码。旧mock覆盖从elementScanLimited=true变为全候选扫描false并检查pagination.hasMore，未以抬高输出上限绕过。
+- 全量Node **204/204通过**，包含原评审修复、MCP重载、部分清理、compact输出和新查询。真实Edge生命周期 **18/18通过**，1600常驻导航+321正文按钮中按名/角色/main找到下载并真实点击，正文321按钮分三批无重复遗漏，第二批后首批ref仍可聚焦，候选变化明确拒绝续页。原扩展端到端 **18/18**、动态列表 **7/7**通过。全部使用临时profile/本地夹具，未操作用户业务页面。
+- 独立审核发现两处菜单边界：无haspopup的关联静态导航仍被晋升popup，及菜单wrapper内独立ARIA按钮被折叠；已分别增加静态导航证据约束、独立动作role识别，并补反例确认。独立审查以原反例复验两处补丁通过，未留已证实阻断问题；最终回归结果和安装文件hash另存temp/qa/v0160/。实际插件与独立skill同步、运行中版本回读分开记录，浏览器扩展重载和MCP重载不混同；未提交推送或Release。
+
+## 2026-11-11：0.15.0任务内按页结束与旧AI页补登记
+
+- 用户截图指出agent把账单总任务未结束误解为所有页面都应保留，且managed=false导致已完成CMS页面无法清理，最后没有实际关闭却汇报完成。本轮按该实际场景增加task close/unkeep/adopt，不增加工具数量；保持原有AI创建/连带创建、当前目标分组、操作结束或超限三条件。
+- close+tabIds表示只结束指定页面对应操作，整任务继续。只关所选当前同任务同组管理页，keep/busy/other-task/not-managed/outside-task-group明确skipped；unkeep显式解除指定页保留，不能改变其他页。finish仍用于整个任务结束。
+- adopt+taskName+pages逐页提交精确tabId/url/groupId以及evidence:{kind,reference}。调用方须有真实AI创建回执/会话创建记录；插件保存provenance:agent-attested并保留引用，不声称可独立验证聊天历史。没有证据不认领，不能从标题/managed=false推断AI创建。已有其他任务或非目标组不强抢，不追认同组未提交页面；明确未分组旧AI页可放入同窗任务组，await前后复核URL和组。
+- tabs.remove完成后还须独立get明确不存在或query核验不存在才进入closed。页面仍存在/核验失败返回close-not-confirmed并保留归属，closedCount=0必须报告实际关闭0页，禁止写清理完成。skill补充“部分操作结束不等于整任务结束”的处理流程及零关闭汇报规则。
+- 独立新增task-recovery.test.cjs **25/25通过**：部分关闭、参数边界、keep/unkeep、跨任务/组/未知页、浏览器remove未生效、核验传输失败、query确认、创建证据缺失/精确身份/声明持久化、await期间URL/group变化。另补自动/显式登记双向竞态以及后续页取消时已登记证据仍跨worker保留的回归；真实Edge生命周期 **14/14通过**，包含同任务单页实际消失且其他页可继续读；旧页未登记时0关闭，真实测试create回执补登记后实际关闭，用户原始页不受影响。全部使用临时profile、目录和本地夹具，未操作截图里的实际CMS/账单页。
+- 全量Node **164/164通过**，无跳过；实现、独立测试、独立审查的模型请求/代理ID记录见temp/qa/v0150/dispatch.json，工具回执仅给ID所以执行型号未独立核实。实际安装副本与用户独立skill同步后逐文件hash核验，运行中扩展版本另外读取，不把磁盘同步当成已加载。
+
+## 2026-11-10：0.14.0 agent发起MCP工作进程重载
+
+- 新增browser_restart({})，共21个工具。MCP入口改为稳定stdio launcher与fork IPC工作进程；原host/port/token/config-dir传给worker，凭据不输出。重载只影响本MCPworker，不重启共享桥或浏览器、不改授权、不重放动作。
+- 候选start/ready后还须activate/activated确认才切换。启动/激活失败保留原worker，成功返回before/after的mcpVersion/mcpPid/mcpGeneration，并发标准tools/list_changed通知。存在在途tools/call时MCP_BUSY拒绝，重载期间新业务MCP_RESTARTING拒绝，不排队。无worker时父连接和恢复管理工具仍可用。
+- browser_status分别报告MCP实际版本、磁盘版本和restartRequired；原version及extensionVersion仍表示桥和浏览器扩展，不能混为同一版本。首次旧式MCP尚无新工具，需要在宿主MCP管理里重连一次加载launcher；工作进程以后可用工具重载，launcher自身更新仍需宿主重启。
+- 独立审查发现EOF原统一等待9秒会截断已接受的10.5秒合法响应；已改为取消尚未切换候选，按业务40秒调用期限加终止余量drain，再退出。worker先注册stop/disconnect监听再动态加载产品依赖，导入挂起时父退出也能收敛；恢复前确认失联残留worker退出。
+- tests/mcp-restart.test.mjs使用真实stdio协议、独立临时运行时副本/配置和随机端口fake桥，9项通过：连接持续/换PID/目录通知、版本及传递依赖schema刷新、失败保留旧worker后修复重试、busy不重放、候选屏障期拒绝、严格空参、候选加载时EOF收敛、正常EOF收敛、慢回执不丢。实现作者另有17组隔离mock自验；关键EOF修正另安排独立复核。
+- 全量Node **133/133通过**；真实Edge生命周期 **12/12通过**，新增同stdio重载后worker代次2、实际MCP0.14.0且共享桥未替换/扩展仍连接，并继续完成读取、并行、截图、清理及桥监督回归。新测试输出在temp/qa/v0140/browser-lifecycle-results.json。不操作用户真实网页。
+- 实际交付核验包含temp/plugins/ai-browser-control安装副本、用户.zcode/skills/ai-browser-control独立skill；文件同步与运行中加载分别记录，首次bootstrap的旧进程不假称已自动变为新launcher。未推送或创建Release。
+
+## 2026-11-10：0.13.0评审修复与清理规则调整（本地候选）
+
+- 基线a77775c，开始时工作区干净。本聊天用户明确清理三条件：AI自己创建或连带创建、当前仍在目标任务分组、agent已评估操作结束或数量超限；满足三项时允许误关。因此原评审第2/4/5项按新口径处理，其余9项修复，保留原始评审证据。显式keep和正在执行命令的页面仍保留；复用保持原有使用/编辑保护。
+- cleanup仅超过12页时回收到限制，finish为agent明确结束信号。删除前再核对session记录身份与实际group；分组失败、移出组、用户原始页及其他任务不关闭。连带页依据webNavigation.onCreatedNavigationTarget的sourceTabId/tabId认领，仅在来源归属、同窗与分组可核验时纳入。新增webNavigation权限仅用于创建来源事件，不记录浏览历史。
+- 真实Edge发现后台window.open的openerTabId可错误指向活动用户原始页，因此弃用tabs.onCreated/opener认领。改用导航事件后，同一真实场景正确关联AI来源页并归组，结束清理不触及用户原始页。Node覆盖多级来源、worker唤醒恢复、错误opener、跨窗/未知来源/移出组/分组失败/删除前归属交还等边界。
+- revokedTabIds保存于storage.session，释放和用户取消调试跨worker恢复；输入/截图各有CDP设置generation，附加完成及派发前重核，迟到附加解除。单结果与批次按UTF-8字节限制10MiB，超大结果转换小错误，终态4xx不无限重传，不重放浏览器动作。
+- 桥以显式租约和命令recipient绑定扩展；poll间隙不交出所有权，unpair/租约切换取消相应队列，其他扩展不能冒领或接走旧命令。默认HTTP期限30秒覆盖25秒待机窗口；已派发后超时报告unverified/勿重复提交，仅尚未派发时提示唤醒后再试。MCP/子桥可传--config-dir，握手测试完全使用临时实例目录和随机端口。
+- DOM特殊点击在按下、处理器、等待和释放后重核业务身份/可交互状态，身份变化后不发送click/contextmenu/dblclick。Enter区分普通input按钮和提交按钮，保留原生submitter及覆盖属性；文本隐式提交尊重默认按钮与禁用状态。
+- 更新器核验精确本地端点、Node路径、本仓库桥入口、PID创建信息并持有进程句柄后终止，不按端口批量杀进程；保留桥显式配置目录与token。无法证明进程归属则拒绝自动替换，非Windows同样安全拒绝。安装测试只写临时home/configDir，清理自己持有的进程与创建的目录。
+- Node全量 **123/123通过**，无跳过。真实Edge生命周期 **11项通过**，包含DOM Enter实际激活/submitter、新清理边界、真实连带归属、后台截图/并行、桥崩溃监督恢复与MCP退出停止监督。安装集成验证同端口127.0.0.2普通服务在桥替换后存活，显式配置token保留。全部运行在临时profile、home/目录和本地夹具，不操作用户浏览器。
+- 原扩展端到端回归 **18/18通过**，含真实DOM/CDP输入/截图、菜单/拖拽/懒加载、诊断、桥重启恢复、释放授权及迟到动作不重放。首轮在手动重连阶段遇到旧断言假设：unpair现立即取消RPC，旧请求返回不等于底层悬挂操作已越过11秒期限；已改为等待桥真实poll通道恢复（有界15秒），继续检查迟到prepare不点击。不是以放宽业务结果断言代替验证。
+- 服务端/DOM、扩展/安装、最终导航来源分别由未参与实现的审查者只读复核。服务端复核补正“待机后已派发超时仍提示重试”的遗留分支；最终导航来源审查9/9相关测试通过，未报告遗留阻断问题。git diff --check通过。当前仅本地源码0.13.0，未推送、发布或替换用户加载中的扩展/MCP；生效需重载扩展（接受新增webNavigation权限）、刷新受控页并重连MCP。
+
+证据：temp/qa/v0130/browser-lifecycle-results.json；原扩展回归输出为temp/qa/browser-extension-results.json。旧版本记录如下保留为历史。
+
 ## 2026-11-10：0.12.0桥恢复、任务页面与多页操作
 
 - 开始前`git pull --ff-only`显示已是最新，基线362ce46，工作区干净。源码/扩展/本地父市场同步0.12.0，共20个工具。新增tabGroups权限用于任务分组，未增加网页来源权限，未安装系统服务、计划任务或工具副本。

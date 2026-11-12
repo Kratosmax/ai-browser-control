@@ -2,7 +2,7 @@
 
 让支持 MCP 的 AI 助手按标签页读取和操作真实 Edge / Chrome。后台操作不切换标签页、不移动系统鼠标。
 
-当前源码版本：0.12.0。新增桥自动恢复、任务标签分组/复用/清理、跨页并行批次与单次DOM/CDP选择，并补齐视觉复查规范。通过仓库更新获取，未创建对应 GitHub Release。
+当前版本：0.16.1。补齐页面脚本RPC的外层异常/空回传/序列化诊断，去掉空结果等同遮挡的误导提示；业务agent遇到插件不可用首次即停止并整理交接报告。保留目标查询/分页及此前修复；多页步骤就绪时优先批量，具体条件见任务并行规范。本仓库提供源码，不另设此版本的 GitHub Release。
 
 ## 开始使用
 
@@ -11,7 +11,7 @@
 1. 下载或克隆本仓库，放到稳定的目录。
 2. 打开 `edge://extensions`（Chrome 为 `chrome://extensions`），启用开发人员模式，加载仓库内的 `extension` 目录。
 3. 让 AI 按 [AGENT-INTEGRATION.md](AGENT-INTEGRATION.md) 接入自己的 MCP 配置。规范包含通用协议、ZCode 配置和验收步骤，不需要运行注册脚本。
-4. 重启 AI 会话，调用 `browser_status`。本地MCP启动即检查并拉起桥，默认端口17653；存活期间每5秒检查，失败退避至最多60秒，恢复后归零。扩展按自身退避周期接回，不需要额外工具调用。
+4. 在客户端MCP管理中连接服务，调用 `browser_status`。新建聊天未必会重启客户端共用的MCP进程。本地MCP启动即检查并拉起桥，默认端口17653；存活期间每5秒检查，失败退避至最多60秒，恢复后归零。扩展按自身退避周期接回，不需要额外工具调用。
 5. 在浏览器中点扩展图标连接，授权当前页；也可由用户打开“自动授权所有网页”。
 
 只读验收提示词：
@@ -55,7 +55,8 @@
 
 | 工具 | 用途 |
 | --- | --- |
-| browser_status | 桥与扩展连接状态 |
+| browser_status | MCP、桥与扩展的实际版本和连接状态 |
+| browser_restart | 重载本MCP工作进程以加载磁盘新版，保持stdio连接；在途操作拒绝，不重放动作 |
 | browser_list_tabs | HTTP(S) 标签页、授权状态及 inputMode/screenshotMode |
 | browser_snapshot | 默认滚动探测懒加载；返回当前正文、ref 与累计观察。load=current 仅回读 |
 | browser_scroll | 主文档或指定容器向上/下、顶部/底部滚动；不点击、不切页 |
@@ -73,7 +74,7 @@
 | browser_release | 释放此页，自动授权模式下也生效 |
 | browser_open | 把指定HTTP(S)网址在已有窗口中新建为后台标签页，不激活窗口 |
 
-每次快照刷新 ref。动作后重新读取快照确认；超时不等于失败，不直接重复提交、支付或发送。快照不读取 Cookie、localStorage 或浏览历史，也不输出密码框的值。
+每次快照刷新 ref。动作后重新读取快照确认；超时不等于失败，不直接重复提交、支付或发送。快照不读取 Cookie、localStorage 或浏览历史，也不输出密码框的值。单结果和批次统一按UTF-8限制10MiB，超过时返回RESULT_TOO_LARGE小错误；桥拒绝无效结果时返回RESULT_REJECTED并恢复取新命令，不重放页面动作。
 
 0.10.0提供17个工具。click支持button=right、clickCount=2、holdMs和position相对位置；press支持ref聚焦和Shift+Tab、Alt+ArrowDown/Up、Shift+F10、Control+Enter。快照增加disabled/focused/checked/selected/hasPopup/controls/busy，inspect可读遮挡、位置和原生select选项；wait最长5秒。DOM悬停不支持纯CSS :hover，CDP真实交互沿用原开关并保留保存值。完整流程与边界见[特殊交互与状态](skills/ai-browser-control/references/interactions.md)。
 
@@ -83,15 +84,23 @@
 
 ### 任务页面与多页工作
 
-每项工作使用唯一taskId和简短taskName，任务名显示在浏览器标签组。默认只复用本任务、同窗口、完整URL相同的插件页面；显式reuseKey可导航复用同源同类页，reuse=false用于需要并排保留的对照页。不会默认复用或清理用户原有页面。新增tabGroups权限仅用于这些任务组。
+每项工作使用唯一taskId和简短taskName，任务名显示在浏览器标签组。默认只复用本任务、同窗口、完整URL相同的插件页面；显式reuseKey可导航复用同源同类页，reuse=false用于需要并排保留的对照页。不会默认复用或清理用户原有页面。tabGroups用于这些任务组，webNavigation仅用新页面创建事件核验连带页来源，不保存浏览历史。
 
 taskId和taskName为open必填参数；升级后客户端必须重连读取新目录，旧open(url)定义不可继续使用。
 
-归属记录使用storage.session，worker重启可恢复，浏览器会话结束后清空；用户移出原分组的页面交还用户。每任务达到12页先整理重复可回收页，仍有12个独立/受保护页则返回TASK_TAB_LIMIT。旧版页面没有可靠归属，不自动追认或批量销毁。
+归属记录使用storage.session，worker重启可恢复，浏览器会话结束后清空；用户移出原分组的页面交还用户。由已管理AI页派生且浏览器导航来源链可核验的连带页面也纳入任务归属和分组。用户原始页不自动追认；旧版无归属页若有真实AI创建回执，可通过显式adopt逐页补登记，调用方创建证据标为agent-attested而不是插件独立证明。
 
-agent在任务完成时调用browser_task(action=finish)，交付页通过keepTabIds保留；cleanup只合并重复页。活动、固定、有声、执行中、keep、插件修改或表单状态不安全/无法核验的页会跳过，并返回具体原因。任务结束由agent显式通知，插件不凭空闲超时猜测；这需要随仓库分发的技能配合，通用MCP协议本身不提供聊天名称和任务结束事件。
+清理须同时满足三项：AI创建或连带创建；当前仍在目标任务分组；agent已评估操作结束，或页面数量超限。某些页面对应操作已结束、总任务还在继续时，用browser_task(action=close,tabIds=[...])只关闭指定管理页；整个任务结束才finish。cleanup用于超过12页时整理。满足三项时允许关闭活动、有声、固定或有未保存输入的页面，不再将这些状态当成禁止清理条件。显式keep的交付页继续保留，正在执行命令的页面本轮跳过。keep页可先unkeep再按页close。adopt需要taskName和pages，每项明确tabId、精确url、当前groupId和evidence:{kind,reference}；reference应指向真实AI创建/连带创建回执，无证据不得登记。回执closed仅列独立核验已消失的页，closedCount=0必须说明实际关闭0页，不能称清理完成；浏览器自身的关闭限制不绕过。任务名称与结束信号仍由agent传入，插件不按空闲时间猜测任务结束。
 
 browser_batch一次最多4个不同tabId，支持快照、截图及交互，返回逐项结果；同页依赖步骤继续顺序执行，批次不是事务，失败不重放业务操作。遇到DOM歧义、遮挡或状态冲突时，技能要求先截图/inspect复查，再判断是否确实需要用户处理。详见[任务、并行与验收](skills/ai-browser-control/references/tasks-and-verification.md)。
+
+### MCP重载
+
+更新后先同步客户端实际使用的插件目录和单独安装的skill副本，再调用`browser_status`。`mcpVersion`是实际MCP工作进程版本，`restartRequired`表示磁盘版本变化待重载；原`version`仍是桥版本，`extensionVersion`是浏览器已加载扩展版本，三者分别核验。
+
+agent调用`browser_restart({})`即可替换MCP工作进程，stdio启动器保持宿主连接，新工作进程就绪后返回before/after实际版本与PID，并通知客户端刷新工具目录。有在途操作时返回MCP_BUSY，重载中拒绝新动作，候选启动失败保留旧工作进程；任何动作都不重放。该工具不替换共享桥、不重载浏览器扩展、不改变用户授权。
+
+首次从不含本接口的旧MCP升级，需要在客户端MCP管理里重连一次以启动新版启动器。以后工作进程更新可用本接口；启动器本身的更新或客户端不刷新工具目录仍需宿主重连，不能声称旧进程能自行获得一个尚不存在的接口。
 
 ### 桥自动恢复
 
@@ -101,7 +110,11 @@ browser_batch一次最多4个不同tabId，支持快照、截图及交互，返�
 
 ### 已加载内容不等于全部数据
 
-`browser_snapshot` 返回 `coverage`：说明只读取当前已加载 DOM、正文是否超过 12000 字符、交互元素扫描是否达到 150 个的上限。达到上限时优先保留视口内控件（`selectionPriority=viewport-first`），以免长列表挤掉弹窗按钮；保留的元素仍按 DOM 顺序输出。`dataCompleteness` 为 `unknown`；浏览器的 document.readyState=complete 也不表示业务列表全部加载。
+`browser_snapshot`每次最多返回150个匹配元素，而非页面操作总上限。找已知按钮可直接传`load=current,name="下载",role="button",exact=true`；name默认包含匹配，context可补充账单/行身份。scope=main/dialog/viewport限定正文、对话框或视口，scopeRef限定最近快照容器。查询遍历当前已加载候选，不受第一批150限制。
+
+需要遍历时用pagination.nextCursor继续，续页只带tabId/cursor及可选format/load=current；同轮编号保留，全部读取后hasMore=false。相关候选增删、重排、身份或可见性变化会返回SNAPSHOT_CHANGED，需重新快照；旧轮游标STALE_CURSOR不能继续。新建无cursor快照会使上一轮ref失效。150是分页大小，pagination.total是本轮已加载匹配候选数量，均不等于业务数据总量。
+
+`coverage`仍提示已加载DOM、正文12000字符截断与业务完整性unknown；候选区域分页不代替网站自身的加载更多/虚拟列表滚动。常驻导航和原生select不因role=menu/listbox就优先当弹层，嵌套同一动作项去重但不同按钮保留。
 
 默认 `load=auto` 会滚动探测懒加载并恢复原滚动位置，最多约8秒/40轮；`loading` 返回停止原因、累计观察、底部文本及截断标记。主文档不滚动时尝试最大的独立滚动容器。历史观察不带 ref，不能直接点击；虚拟列表须先滚动再获取新 ref。`bottom-stable` 只表示暂时稳定，`complete=false`；定位“最后一项”仍须核对站点总数/可靠结束标志和分页状态，不能换成“当前已加载末项”。没有取齐时继续 `browser_scroll` 或报告未完成。
 
@@ -176,6 +189,12 @@ node install.mjs update
 node install.mjs update --refresh-registration
 ```
 
+## 插件故障的交接
+
+业务agent遇到连接、注入、页面RPC空回传或运行时故障时，首次立即停止相关业务并报告，不反复换参数、重载或自行改设置。按随附技能的[故障交接](skills/ai-browser-control/references/failure-reporting.md)保留首次错误/code、命令编号、tabId、实际版本、最后阶段、现有证据与未完成事项；没有跨会话通信能力就给出可转交报告，不声称已自动通知维护者。普通无匹配或过期ref等按明确错误语义处理，不能把所有空页面当插件故障。
+
+页面错误回执中的diagnostic只含固定类型、阶段、计数和布尔元数据；null/undefined、无result、顶层执行失败、代理缺失和序列化失败分别标识。日志不保存页面正文/输入/URL/截图/原始异常文本，原始业务回传内容不因排障落盘。注入API返回不等于文件完成执行，截图成功不等于DOM读取成功。维护者需依证据复现，恢复和已确认根因分别说明。
+
 ## 本地运行、测试与预览
 
 本项目是原生 JavaScript 扩展 + Node 服务，不需要编译或打包运行时。可直接加载 `extension`，双击“启动桥接服务.cmd”或运行：
@@ -190,7 +209,7 @@ node test-page/serve.mjs
 自动化回归：
 
 ```powershell
-node --test tests/bridge.test.mjs tests/install.test.mjs tests/diagnostics.test.mjs tests/protocol.test.mjs tests/supervisor.test.mjs extension/tests/mock.test.cjs extension/tests/expired-result.test.cjs extension/tests/tasks.test.cjs
+node --test tests/bridge.test.mjs tests/install.test.mjs tests/diagnostics.test.mjs tests/protocol.test.mjs tests/supervisor.test.mjs extension/tests/mock.test.cjs extension/tests/expired-result.test.cjs extension/tests/tasks.test.cjs extension/tests/page-interactions.test.cjs extension/tests/task-recovery.test.cjs extension/tests/snapshot-query.test.cjs extension/tests/page-rpc.test.cjs tests/mcp-restart.test.mjs tests/snapshot-format.test.mjs
 python -X utf8 tests/browser-ui.py
 python -X utf8 tests/browser-extension.py
 python -X utf8 tests/browser-loading.py
@@ -209,7 +228,7 @@ Python 项仅供开发验收，依赖测试机已有 Python Playwright、Pillow 
 
 主要入口：
 
-- `server/mcp.mjs`：MCP stdio；`server/supervisor.mjs`：本地桥监督；`server/protocol.mjs`：20个工具与共用参数校验；`server/bridge.mjs`：指令队列、来源校验、远程 token。
+- `server/mcp.mjs`：MCP stdio；`server/supervisor.mjs`：本地桥监督；`server/protocol.mjs`：21个工具与共用参数校验；`server/bridge.mjs`：指令队列、来源校验、远程 token。
 - `extension/background.js`：授权、CDP/DOM 路由、跨页批次、结果重传；`extension/tasks.js`：会话级任务页面归属、复用与清理。
 - `extension/page-agent.js`：DOM 快照、ref、定位与 DOM 操作；`extension/cursor.js`：光标与动效。
 - `extension/popup.*`：弹窗；`install.mjs`：桥管理、更新及旧注册兼容。

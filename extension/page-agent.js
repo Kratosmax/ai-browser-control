@@ -2,12 +2,16 @@
   'use strict';
 
   // 注入到隔离世界；重复注入保留当前引用，不接收网页脚本指令。
-  if (globalThis.__aiBrowserPageAgent7) return;
+  if (globalThis.__aiBrowserPageAgent8) return;
 
   let generation = Date.now();
   let refs = new Map();
-  const SELECTOR = 'input,textarea,select,button,a,[role],[tabindex],[contenteditable],[aria-haspopup],[draggable="true"],[ondrop]';
+  let refUrl = location.href;
+  let snapshotCache = null;
+  let snapshotRequest = 0;
+  const SELECTOR = 'input,textarea,select,button,a,main,dialog,[role],[tabindex],[contenteditable],[aria-haspopup],[draggable="true"],[ondrop]';
   const TEXT_INPUTS = new Set(['text', 'search', 'email', 'url', 'tel', 'password', 'number']);
+  const IMPLICIT_SUBMIT_INPUTS = new Set([...TEXT_INPUTS, 'date', 'month', 'week', 'time', 'datetime-local']);
 
   function visible(element) {
     if (!element.isConnected || element.closest('[hidden]')) return false;
@@ -19,35 +23,121 @@
     return Array.from(element.getClientRects()).some((rect) => rect.width > 0 && rect.height > 0);
   }
 
-  function popupRoots() {
-    const roots = new Set(document.querySelectorAll('[role="menu"],[role="listbox"]'));
-    for (const trigger of document.querySelectorAll('[aria-controls],[aria-owns]')) {
-      for (const id of `${trigger.getAttribute('aria-controls') || ''} ${trigger.getAttribute('aria-owns') || ''}`.split(/\s+/).filter(Boolean)) {
-        const root = document.getElementById(id);
-        const popup = trigger.getAttribute('aria-haspopup');
-        if (root && ((popup && popup !== 'false') || ['menu', 'listbox'].includes(root.getAttribute('role')))) roots.add(root);
-      }
-    }
-    return [...roots].filter(visible);
+  function scanCache() {
+    return { descriptors: new WeakMap(), ancestors: new WeakMap(), visibility: new WeakMap() };
   }
 
-  function popupItems(roots) {
+  function scanVisible(element, cache) {
+    if (!cache) return visible(element);
+    if (!cache.visibility.has(element)) cache.visibility.set(element, visible(element));
+    return cache.visibility.get(element);
+  }
+
+  function inViewport(element) {
+    return Array.from(element.getClientRects()).some(rect => rect.width > 0 && rect.height > 0 &&
+      rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth);
+  }
+
+  function popupRoots(cache) {
+    const roots = new Set(), collapsed = new Set();
+    const nativeSelect = root => root instanceof HTMLSelectElement || Boolean(root.closest('select'));
+    for (const trigger of document.querySelectorAll('[aria-controls],[aria-owns]')) {
+      if (trigger instanceof HTMLSelectElement) continue;
+      const ids = (trigger.getAttribute('aria-controls') || '') + ' ' + (trigger.getAttribute('aria-owns') || '');
+      for (const id of ids.split(/\s+/).filter(Boolean)) {
+        const root = document.getElementById(id), popup = trigger.getAttribute('aria-haspopup');
+        if (!root || nativeSelect(root) || !((popup && popup !== 'false') || ['menu', 'listbox'].includes(root.getAttribute('role')))) continue;
+        if (trigger.getAttribute('aria-expanded') === 'false') { collapsed.add(root); continue; }
+        const nav = root.closest('nav,[role="navigation"]');
+        const floating = ['absolute', 'fixed'].includes(getComputedStyle(root).position) || root.matches(':popover-open');
+        // aria-controls也用于侧栏折叠；静态导航不能仅凭关联属性晋升为弹层。
+        if (nav && (nav === root || !floating || !popup || popup === 'false')) continue;
+        if (!popup && !floating) continue;
+        if (scanVisible(trigger, cache) && scanVisible(root, cache)) roots.add(root);
+      }
+    }
+    // Plain menus/listboxes in navigation are not popups. Floating CSS menus
+    // inside navigation need a nearby open popup trigger as additional evidence.
+    for (const root of document.querySelectorAll('[role="menu"],[role="listbox"]')) {
+      if (roots.has(root) || collapsed.has(root) || nativeSelect(root) || !scanVisible(root, cache)) continue;
+      const style = getComputedStyle(root);
+      if (!['absolute', 'fixed'].includes(style.position) && !root.matches(':popover-open')) continue;
+      const nav = root.closest('nav,[role="navigation"]');
+      if (nav === root) continue;
+      if (!nav && root.getAttribute('role') !== 'listbox') { roots.add(root); continue; }
+      let associated = false;
+      for (let node = root.parentElement, depth = 0; node && node !== document.body && depth < 3; node = node.parentElement, depth++) {
+        associated = [node, ...node.querySelectorAll('[aria-haspopup]')].some(trigger => {
+          const popup = trigger.getAttribute('aria-haspopup');
+          if (!popup || popup === 'false' || trigger instanceof HTMLSelectElement || root.contains(trigger) ||
+              trigger.getAttribute('aria-expanded') === 'false' || !scanVisible(trigger, cache)) return false;
+          const ids = ((trigger.getAttribute('aria-controls') || '') + ' ' + (trigger.getAttribute('aria-owns') || '')).trim();
+          return !ids || ids.split(/\s+/).includes(root.id);
+        });
+        if (associated || node === nav) break;
+      }
+      if (associated) roots.add(root);
+    }
+    return [...roots];
+  }
+
+  function independentAction(element) {
+    return element.matches('button,input,select,textarea,a[href],[contenteditable="true"],[draggable="true"],[ondrop]') ||
+      ['button', 'link', 'checkbox', 'radio', 'switch', 'combobox', 'textbox', 'searchbox', 'slider', 'spinbutton'].includes(element.getAttribute('role')) ||
+      element.hasAttribute('onclick') || typeof element.onclick === 'function' ||
+      Boolean(element.getAttribute('aria-haspopup') && element.getAttribute('aria-haspopup') !== 'false');
+  }
+
+  function popupItems(roots, cache) {
     const items = new Set();
     for (const root of roots) {
       for (const element of root.querySelectorAll('li,[role="menuitem"],[role="menuitemcheckbox"],[role="menuitemradio"],[role="option"],[tabindex],button,a')) {
-        if (visible(element)) items.add(element);
+        if (scanVisible(element, cache)) items.add(element);
       }
-      // 非语义div菜单仅在已明确关联的弹层范围内识别指针样式，避免把整页正文当作按钮。
+      // Pointer-only items are recognized only inside an evidenced popup.
       for (const element of root.querySelectorAll('div,span')) {
-        if (visible(element) && compact(element.innerText) && getComputedStyle(element).cursor === 'pointer' &&
-            ![...element.querySelectorAll('li,[role],button,a,[tabindex]')].some(visible)) items.add(element);
+        if (scanVisible(element, cache) && compact(element.innerText) && getComputedStyle(element).cursor === 'pointer') items.add(element);
       }
     }
     return items;
   }
 
+  function candidateSet(cache = scanCache()) {
+    const roots = popupRoots(cache), rootSet = new Set(roots), popup = popupItems(roots, cache);
+    const primary = [...document.querySelectorAll(SELECTOR)], primarySet = new Set(primary);
+    const candidates = [...new Set([...primary, ...popup])];
+    // Merge only nested representations of one action, never same-name siblings.
+    // Native controls and explicit independent handlers always remain separate targets.
+    const nested = new Map();
+    for (const element of candidates) {
+      if (!popup.has(element)) continue;
+      for (let parent = element.parentElement; parent && parent !== document.body; parent = parent.parentElement) {
+        if (!nested.has(parent)) nested.set(parent, []);
+        nested.get(parent).push(element);
+        if (rootSet.has(parent)) break;
+      }
+    }
+    const kept = candidates.filter(element => {
+      if (!popup.has(element) || independentAction(element)) return true;
+      if ((nested.get(element) || []).some(child => scanVisible(child, cache) &&
+          (independentAction(child) || child.getAttribute('role')?.startsWith('menuitem') ||
+           (!element.getAttribute('role')?.startsWith('menuitem') && nameOf(child) === nameOf(element))))) return false;
+      for (let parent = element.parentElement; parent && parent !== document.body; parent = parent.parentElement) {
+        if (popup.has(parent) && (independentAction(parent) || parent.getAttribute('role')?.startsWith('menuitem'))) return false;
+        if (rootSet.has(parent)) break;
+      }
+      return true;
+    });
+    // The selector and pointer-item lists can overlap; restore actual document order.
+    if (kept.some(element => !primarySet.has(element))) {
+      kept.sort((a, b) => typeof a.compareDocumentPosition === 'function' ?
+        (a.compareDocumentPosition(b) & 2 ? 1 : a.compareDocumentPosition(b) & 4 ? -1 : 0) : 0);
+    }
+    return { candidates: kept, popup, roots };
+  }
+
   function interactiveCandidates() {
-    return [...new Set([...document.querySelectorAll(SELECTOR), ...popupItems(popupRoots())])];
+    return candidateSet().candidates;
   }
 
   function compact(value, limit = 500) {
@@ -60,8 +150,10 @@
       return document.getElementById(id)?.textContent || '';
     }).join(' ') : '';
     const labels = element.labels ? Array.from(element.labels).map((label) => label.innerText).join(' ') : '';
+    // Region/menu names come from author labels, not every descendant's changing text.
+    const contents = ['main', 'navigation', 'menu', 'menubar', 'listbox', 'dialog', 'region', 'list'].includes(roleOf(element)) ? '' : element.innerText;
     return compact(element.getAttribute('aria-label') || labelledText || labels ||
-      element.getAttribute('alt') || element.innerText || element.getAttribute('placeholder') ||
+      element.getAttribute('alt') || contents || element.getAttribute('placeholder') ||
       element.getAttribute('title') ||
       (element instanceof HTMLInputElement && ['button', 'submit', 'reset'].includes(element.type) ? element.value : ''));
   }
@@ -72,6 +164,7 @@
     const tag = element.tagName.toLowerCase();
     if (tag === 'a') return element.hasAttribute('href') ? 'link' : 'generic';
     if (tag === 'button') return 'button';
+    if (tag === 'main' || tag === 'dialog') return tag;
     if (tag === 'textarea' || element.isContentEditable) return 'textbox';
     if (tag === 'select') return element.multiple ? 'listbox' : 'combobox';
     if (tag === 'input') {
@@ -85,28 +178,37 @@
     return 'generic';
   }
 
-  function describe(element) {
+  function describe(element, cache) {
+    if (cache?.descriptors.has(element)) return cache.descriptors.get(element);
     const name = nameOf(element);
     let context = name;
-    // 携带整行/卡片的身份信息，不能仅用重复的“订票”文字识别目标。
-    for (let node = element.parentElement, depth = 0; node && node !== document.body && depth < 12; node = node.parentElement, depth++) {
-      const text = compact(node.innerText, 1601);
-      if (text.length > 1600) break;
-      const row = node.matches('article,li,tr,[role="row"],[role="listitem"],[role="dialog"],[aria-modal="true"]');
-      // 不跨入包含其他独立按钮的列表/页面容器：否则错误按钮也能匹配别班航班号。
-      const buttons = [...node.querySelectorAll('button,[role="button"]')].filter(visible);
-      if (!row && buttons.some(button => button !== element && !button.contains(element) && !element.contains(button))) break;
-      if (text.length > context.length) context = text;
-      if (row) break;
+    const region = ['main', 'navigation', 'menu', 'menubar', 'listbox', 'dialog', 'region', 'list'].includes(roleOf(element));
+    // Cache ancestor summaries for this synchronous scan, never across DOM changes.
+    for (let node = region ? null : element.parentElement, depth = 0; node && node !== document.body && depth < 12; node = node.parentElement, depth++) {
+      let summary = cache?.ancestors.get(node);
+      if (!summary) {
+        const text = compact(node.innerText, 1601);
+        const row = node.matches('article,li,tr,[role="row"],[role="listitem"],[role="dialog"],[aria-modal="true"]');
+        summary = { text, row, buttons: text.length <= 1600 && !row ?
+          [...node.querySelectorAll('button,[role="button"]')].filter(button => scanVisible(button, cache)) : [] };
+        cache?.ancestors.set(node, summary);
+      }
+      if (summary.text.length > 1600) break;
+      // Do not borrow another row's business identity through a shared list container.
+      if (!summary.row && summary.buttons.some(button => button !== element && !button.contains(element) && !element.contains(button))) break;
+      if (summary.text.length > context.length) context = summary.text;
+      if (summary.row) break;
     }
-    return { name, role: roleOf(element), tag: element.tagName.toLowerCase(), context,
+    const descriptor = { name, role: roleOf(element), tag: element.tagName.toLowerCase(), context,
       href: element.getAttribute('href'), expanded: element.getAttribute('aria-expanded') };
+    cache?.descriptors.set(element, descriptor);
+    return descriptor;
   }
 
   const identity = descriptor => JSON.stringify([descriptor.name, descriptor.role, descriptor.tag, descriptor.context, descriptor.href]);
 
   function resolve(ref) {
-    if (typeof ref !== 'string' || !refs.has(ref)) throw Object.assign(new Error('ref 无效或已过期，请重新 snapshot'), { code: 'STALE_REF' });
+    if (location.href !== refUrl || typeof ref !== 'string' || !refs.has(ref)) throw Object.assign(new Error('ref 无效或已过期，请重新 snapshot'), { code: 'STALE_REF' });
     const record = refs.get(ref);
     const element = record.element;
     if (!visible(element)) throw Object.assign(new Error('目标已移除或不可见，请重新 snapshot'), { code: 'ELEMENT_NOT_VISIBLE' });
@@ -218,6 +320,7 @@
     moveScroll(area, top);
     await new Promise(done => setTimeout(done, 250));
     refs.clear();
+    snapshotCache = null;
     return { before, after: position(area), refsExpired: true, note: '滚动到底不代表业务数据已完整；请重新 snapshot。' };
   }
 
@@ -247,10 +350,11 @@
         const text = document.body?.innerText || '';
         const next = `${state.height}:${state.top}:${hash(text)}`;
         if (next !== signature) { signature = next; stableSince = Date.now(); }
+        const cache = scanCache();
         for (const element of document.querySelectorAll(SELECTOR)) {
           const rect = element.getClientRects()[0];
-          if (!rect || rect.bottom <= 0 || rect.top >= innerHeight || !visible(element)) continue;
-          const item = describe(element), key = identity(item);
+          if (!rect || rect.bottom <= 0 || rect.top >= innerHeight || !scanVisible(element, cache)) continue;
+          const item = describe(element, cache), key = identity(item);
           if (observed.has(key)) continue;
           observed.add(key);
           if (chars + item.context.length + item.name.length > 24000 || report.observed.length >= 300) {
@@ -277,89 +381,173 @@
     return report;
   }
 
-  async function snapshot(options = {}) {
-    const load = options?.load || 'auto';
-    if (!['auto', 'current'].includes(load)) throw new Error('load 必须为 auto 或 current');
-    const loading = load === 'auto' ? await explore() : { attempted: false, complete: false, stopReason: 'current-only' };
-    generation = Math.max(generation + 1, Date.now());
-    refs = new Map();
-    const elements = [];
-    const iframes = Array.from(document.querySelectorAll('iframe'));
+  function snapshotError(code, message) {
+    return Object.assign(new Error(message), { code });
+  }
 
-    const collectText = () => {
-      let text = (document.body?.innerText || '');
-      // 同源 iframe 文本并入；跨域受浏览器隔离拿不到，如实以 frames 计数呈现。
-      for (const frame of iframes) {
-        try {
-          const inner = frame.contentDocument?.body?.innerText || '';
-          if (inner.trim()) text += '\n[iframe]\n' + inner;
-        } catch { /* 跨域 iframe */ }
-      }
-      return text;
-    };
-
-    let text = collectText();
-    // 返回当前真实内容；短文档不等于尚未加载，不无条件追加 1.2 秒延迟。
-
-    const popupCandidates = popupItems(popupRoots());
-    const candidates = interactiveCandidates();
-    const buttonCounts = new Map();
-    for (const element of candidates) {
-      if (roleOf(element) !== 'button') continue;
-      const name = nameOf(element);
-      if (name) buttonCounts.set(name, (buttonCounts.get(name) || 0) + 1);
+  function snapshotQuery(options) {
+    const scope = options.scope ?? 'all', limit = options.limit ?? 150;
+    if (!['all', 'main', 'dialog', 'viewport'].includes(scope)) throw snapshotError('INVALID_PARAMS', 'scope 必须为 all、main、dialog 或 viewport');
+    if (!Number.isInteger(limit) || limit < 1 || limit > 150) throw snapshotError('INVALID_PARAMS', 'limit 必须为 1..150 的整数');
+    if (options.scopeRef !== undefined && options.scope !== undefined) throw snapshotError('INVALID_PARAMS', 'scopeRef 与 scope 互斥');
+    for (const key of ['name', 'role', 'context', 'scopeRef']) {
+      if (options[key] !== undefined && typeof options[key] !== 'string') throw snapshotError('INVALID_PARAMS', key + ' 必须为字符串');
     }
-    const domOrder = new Map(candidates.map((element, index) => [element, index]));
-    // 先保留视口内控件，防止长列表把当前弹窗的关闭按钮挤出上限。
-    const inViewport = new Set(candidates.filter(element => Array.from(element.getClientRects()).some(rect =>
-      rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 &&
-      rect.top < innerHeight && rect.left < innerWidth)));
-    candidates.sort((a, b) => Number(popupCandidates.has(b)) - Number(popupCandidates.has(a)) || Number(inViewport.has(b)) - Number(inViewport.has(a)));
-    let scannedCandidates = 0;
-    for (const element of candidates) {
-      if (elements.length >= 150) break;
-      scannedCandidates++;
-      if (!visible(element)) continue;
-      const ref = `r${generation}-${elements.length + 1}`;
-      const descriptor = describe(element);
-      const ambiguous = descriptor.role === 'button' && buttonCounts.get(descriptor.name) > 1;
-      refs.set(ref, { element, identity: identity(descriptor), ambiguous });
-      const item = {
-        ref,
-        ...descriptor,
-        requiresExpectedContext: ambiguous,
-        inViewport: inViewport.has(element),
-        inPopup: popupCandidates.has(element),
-        ...elementState(element)
-      };
-      // 密码框保留定位信息，不把内容放入快照。
+    if (options.exact !== undefined && typeof options.exact !== 'boolean') throw snapshotError('INVALID_PARAMS', 'exact 必须为布尔值');
+    // Resolve the old ref before the fresh snapshot expires the previous generation.
+    const container = options.scopeRef !== undefined ? resolve(options.scopeRef) : null;
+    return { scope, limit, name: options.name, role: options.role, context: options.context,
+      exact: options.exact ?? false, container, containerIdentity: container ? identity(describe(container)) : null };
+  }
+
+  function scopeRoots(query, cache) {
+    if (query.container) return scanVisible(query.container, cache) ? [query.container] : [];
+    const selector = query.scope === 'main' ? 'main,[role="main"]' :
+      query.scope === 'dialog' ? 'dialog,[role="dialog"],[aria-modal="true"]' : null;
+    if (!selector) return [];
+    const roots = [...document.querySelectorAll(selector)].filter(root => scanVisible(root, cache)), rootSet = new Set(roots);
+    return roots.filter(root => {
+      for (let parent = root.parentElement; parent; parent = parent.parentElement) if (rootSet.has(parent)) return false;
+      return true;
+    });
+  }
+
+  function scanSnapshot(query) {
+    const cache = scanCache(), collected = candidateSet(cache), regions = scopeRoots(query, cache);
+    const records = [], buttonCounts = new Map(), regionSet = new Set(regions), membership = new WeakMap();
+    const limitedRegion = query.container || ['main', 'dialog'].includes(query.scope);
+    const inRegion = element => {
+      const path = []; let node = element;
+      while (node && !regionSet.has(node) && !membership.has(node)) { path.push(node); node = node.parentElement; }
+      const found = Boolean(node && (regionSet.has(node) || membership.get(node)));
+      for (const visited of path) membership.set(visited, found);
+      return found;
+    };
+    for (const [domIndex, element] of collected.candidates.entries()) {
+      if (!scanVisible(element, cache)) continue;
+      const descriptor = describe(element, cache);
+      if (descriptor.role === 'button' && descriptor.name) buttonCounts.set(descriptor.name, (buttonCounts.get(descriptor.name) || 0) + 1);
+      if (limitedRegion && !inRegion(element)) continue;
+      const viewport = inViewport(element);
+      if (query.scope === 'viewport' && !viewport) continue;
+      if (query.name !== undefined && !(query.exact ? descriptor.name === query.name : descriptor.name.includes(query.name))) continue;
+      if (query.role !== undefined && descriptor.role !== query.role) continue;
+      if (query.context !== undefined && !descriptor.context.includes(query.context)) continue;
+      records.push({ element, descriptor, identity: identity(descriptor), domIndex,
+        inViewport: viewport, inPopup: collected.popup.has(element) });
+    }
+    for (const record of records) record.ambiguous = record.descriptor.role === 'button' && (buttonCounts.get(record.descriptor.name) || 0) > 1;
+    return { records, regions, candidateCount: collected.candidates.length,
+      popupCount: records.filter(record => record.inPopup).length, cache };
+  }
+
+  function snapshotText(query, regions, iframes) {
+    let text = '';
+    const limitedRegion = query.container || ['main', 'dialog'].includes(query.scope);
+    if (limitedRegion) text = regions.map(root => root.innerText || '').join('\n');
+    else if (query.scope === 'viewport') {
+      // Read the text's own rectangles, not a large ancestor that straddles the viewport.
+      if (document.body && document.createTreeWalker && document.createRange) {
+        const walker = document.createTreeWalker(document.body, 4), range = document.createRange();
+        for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+          if (!node.textContent?.trim() || !node.parentElement || !visible(node.parentElement)) continue;
+          range.selectNodeContents(node);
+          if (inViewport(range)) text += node.textContent + '\n';
+        }
+      }
+    } else text = document.body?.innerText || '';
+    // Preserve existing same-origin frame text coverage; cross-origin frames remain isolated.
+    for (const frame of iframes) {
+      if (limitedRegion && !regions.some(root => root.contains(frame))) continue;
+      if (query.scope === 'viewport' && (!visible(frame) || !inViewport(frame))) continue;
+      try {
+        const inner = frame.contentDocument?.body?.innerText || '';
+        if (inner.trim()) text += '\n[iframe]\n' + inner;
+      } catch { /* cross-origin iframe */ }
+    }
+    return text;
+  }
+
+  function snapshotPage(cache, offset) {
+    const records = cache.ordered.slice(offset, offset + cache.query.limit);
+    // Selection honors popup/viewport priority; each batch retains readable DOM order.
+    const elements = [...records].sort((a, b) => a.domIndex - b.domIndex).map(record => {
+      const { element, descriptor } = record;
+      refs.set(record.ref, { element, identity: record.identity, ambiguous: record.ambiguous });
+      const item = { ref: record.ref, ...descriptor, expanded: element.getAttribute('aria-expanded'), requiresExpectedContext: record.ambiguous,
+        inViewport: inViewport(element), inPopup: record.inPopup, ...elementState(element) };
+      // Password contents never enter the snapshot or pagination cache.
       if (element instanceof HTMLInputElement && element.type !== 'password') item.value = element.value.slice(0, 2000);
       else if (element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) item.value = element.value.slice(0, 2000);
       else if (element.isContentEditable) item.value = (element.innerText || '').slice(0, 2000);
-      elements.push(item);
+      return item;
+    });
+    const total = cache.ordered.length, next = offset + records.length, hasMore = next < total;
+    const nextCursor = hasMore ? cache.cursorBase + '.' + next : null;
+    if (nextCursor) cache.cursors.set(nextCursor, next);
+    return { ...cache.base, elements,
+      pagination: { snapshotId: cache.snapshotId, offset, limit: cache.query.limit, total, hasMore, nextCursor } };
+  }
+
+  function continueSnapshot(options) {
+    for (const key of Object.keys(options)) {
+      if (!['tabId', 'cursor', 'format', 'load'].includes(key)) throw snapshotError('INVALID_PARAMS', '续页只能携带 tabId、cursor、format，以及可选 load=current');
     }
-    // 输出仍按 DOM 顺序排列；优先级只决定上限内保留哪些元素。
-    elements.sort((a, b) => domOrder.get(refs.get(a.ref).element) - domOrder.get(refs.get(b.ref).element));
-    return {
-      title: document.title,
-      url: location.href,
-      text: text.slice(0, 12000),
-      textLength: text.length,
-      frames: iframes.length,
-      elements,
-      loading,
-      coverage: {
-        scope: 'loaded-dom',
-        selectionPriority: popupCandidates.size ? 'popup-then-viewport' : 'viewport-first',
-        dataCompleteness: 'unknown',
-        documentReadyState: document.readyState || 'unknown',
-        textTruncated: text.length > 12000,
-        elementScanLimited: scannedCandidates < candidates.length,
-        candidateCount: candidates.length,
-        scannedCandidates,
-        limits: { textCharacters: 12000, elements: 150 }
-      }
-    };
+    if (options.load !== undefined && options.load !== 'current') throw snapshotError('INVALID_PARAMS', 'cursor 续页不执行加载探测，load 只能为 current');
+    const cache = snapshotCache;
+    if (!cache || typeof options.cursor !== 'string' || !cache.cursors.has(options.cursor) || cache.base.url !== location.href) {
+      if (cache?.base.url !== location.href) { snapshotCache = null; refs = new Map(); }
+      throw snapshotError('STALE_CURSOR', 'cursor 无效或已过期，请重新 snapshot');
+    }
+    const current = scanSnapshot(cache.query);
+    const changed = cache.query.container && (!visible(cache.query.container) || identity(describe(cache.query.container)) !== cache.query.containerIdentity) ||
+      current.records.length !== cache.records.length || current.records.some((record, index) => {
+        const previous = cache.records[index];
+        return record.element !== previous.element || record.identity !== previous.identity || record.inPopup !== previous.inPopup || record.ambiguous !== previous.ambiguous;
+      });
+    if (changed) {
+      snapshotCache = null;
+      refs = new Map();
+      throw snapshotError('SNAPSHOT_CHANGED', '本轮匹配候选的顺序、身份或可见性已变化；已停止分页，请重新 snapshot');
+    }
+    // Do not refresh generation, probe loading, or expire refs returned on previous pages.
+    return snapshotPage(cache, cache.cursors.get(options.cursor));
+  }
+
+  async function snapshot(options = {}) {
+    if (!options || typeof options !== 'object' || Array.isArray(options)) throw snapshotError('INVALID_PARAMS', 'snapshot 参数必须为对象');
+    if (options.format !== undefined && !['full', 'compact'].includes(options.format)) throw snapshotError('INVALID_PARAMS', 'format 必须为 full 或 compact');
+    if (options.cursor !== undefined) return continueSnapshot(options);
+    const load = options.load ?? 'auto';
+    if (!['auto', 'current'].includes(load)) throw snapshotError('INVALID_PARAMS', 'load 必须为 auto 或 current');
+    const query = snapshotQuery(options), request = ++snapshotRequest;
+    generation = Math.max(generation + 1, Date.now());
+    refs = new Map();
+    snapshotCache = null;
+    refUrl = location.href;
+    const loading = load === 'auto' ? await explore() : { attempted: false, complete: false, stopReason: 'current-only' };
+    if (request !== snapshotRequest || location.href !== refUrl) throw snapshotError('SNAPSHOT_CHANGED', '快照探测期间页面或快照代际已变化，请重新 snapshot');
+    if (query.container && (!visible(query.container) || identity(describe(query.container)) !== query.containerIdentity)) throw snapshotError('SNAPSHOT_CHANGED', 'scopeRef 容器在探测期间已变化，请重新 snapshot');
+    const scanned = scanSnapshot(query), iframes = [...document.querySelectorAll('iframe')];
+    const text = snapshotText(query, scanned.regions, iframes), snapshotId = 'r' + generation;
+    // Store one complete latest matching set; no hidden candidate budget drops later pages.
+    const records = scanned.records;
+    records.forEach((record, index) => { record.ref = snapshotId + '-' + (index + 1); });
+    const ordered = [...records].sort((a, b) => Number(b.inPopup) - Number(a.inPopup) || Number(b.inViewport) - Number(a.inViewport));
+    const requestedScope = query.container ? 'ref' : query.scope;
+    const scopeFound = !query.container && ['all', 'viewport'].includes(query.scope) || scanned.regions.length > 0;
+    snapshotCache = { query, snapshotId, records, ordered, cursors: new Map(),
+      cursorBase: snapshotId + '.' + Math.random().toString(36).slice(2),
+      base: { title: document.title, url: location.href, text: text.slice(0, 12000), textLength: text.length,
+        frames: iframes.length, loading,
+        coverage: { scope: 'loaded-dom', requestedScope, scopeFound,
+          scopeNote: scopeFound ? '仅当前已加载 DOM；匹配总数不代表业务全量。' : '未找到可见的 ' + requestedScope + ' 区域；没有回退到整页。',
+          selectionPriority: scanned.popupCount ? 'popup-then-viewport' : 'viewport-first',
+          dataCompleteness: 'unknown', documentReadyState: document.readyState || 'unknown',
+          textTruncated: text.length > 12000, elementScanLimited: false,
+          candidateCount: scanned.candidateCount, scannedCandidates: scanned.candidateCount,
+          matchedCandidateCount: records.length, limits: { textCharacters: 12000, elements: query.limit } } } };
+    return snapshotPage(snapshotCache, 0);
   }
 
   function elementState(element) {
@@ -377,7 +565,7 @@
   function inspect(ref) {
     syncHoverHold();
     const record = refs.get(ref);
-    if (!record) throw new Error('ref无效或已过期，请重新snapshot');
+    if (location.href !== refUrl || !record) throw snapshotError('STALE_REF', 'ref无效或已过期，请重新snapshot');
     const element = record.element;
     if (!element.isConnected) return { removed: true, visible: false };
     const descriptor = describe(element), rect = element.getClientRects()[0];
@@ -391,7 +579,9 @@
     if (element.hasAttribute('aria-controls') || element.hasAttribute('aria-owns')) {
       const roots = `${element.getAttribute('aria-controls') || ''} ${element.getAttribute('aria-owns') || ''}`.split(/\s+/).filter(Boolean)
         .map(id => document.getElementById(id)).filter(Boolean);
-      state.popups = roots.map(root => ({ id: root.id, visible: visible(root), itemCount: popupItems([root]).size }));
+      const collected = candidateSet();
+      state.popups = roots.filter(root => collected.roots.includes(root)).map(root => ({ id: root.id, visible: visible(root),
+        itemCount: collected.candidates.filter(item => collected.popup.has(item) && root.contains(item)).length }));
     }
     if (rect) state.rect = { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
     if (element instanceof HTMLSelectElement) {
@@ -534,19 +724,32 @@
     pointerPosition = { x: point.x, y: point.y };
     holdHover({ ref });
     const data = { button: right ? 2 : 0, buttons: right ? 2 : 1 };
-    // 普通click保留既有行为；特殊动作才明确派发完整事件序列。
+    const checkTarget = () => {
+      const hit = pointerTarget(ref, point);
+      if (!element.isConnected || (hit !== element && !element.contains(hit))) {
+        throw Object.assign(new Error('按下期间命中目标已变化，请重新 snapshot'), { code: 'TARGET_CHANGED' });
+      }
+    };
+    // 处理器或长按等待可能复用节点；释放始终完成，业务事件必须重新核验。
     for (let count = 1; count <= clickCount; count++) {
-      pointerTarget(ref, point);
-      mouse(element, 'pointerdown', point, data); mouse(element, 'mousedown', point, { ...data, detail: count });
-      try { if (holdMs) await new Promise(done => setTimeout(done, holdMs)); }
-      finally {
+      checkTarget();
+      try {
+        mouse(element, 'pointerdown', point, data);
+        checkTarget();
+        mouse(element, 'mousedown', point, { ...data, detail: count });
+        checkTarget();
+        if (holdMs) await new Promise(done => setTimeout(done, holdMs));
+      } finally {
         mouse(element, 'pointerup', point, { ...data, buttons: 0 }); mouse(element, 'mouseup', point, { ...data, buttons: 0, detail: count });
       }
-      if (!element.isConnected) break;
+      checkTarget();
       if (right) mouse(element, 'contextmenu', point, { button: 2, detail: count });
       else if (!holdMs) mouse(element, 'click', point, { detail: count });
     }
-    if (!right && clickCount === 2 && element.isConnected) mouse(element, 'dblclick', point, { detail: 2 });
+    if (!right && clickCount === 2) {
+      checkTarget();
+      mouse(element, 'dblclick', point, { detail: 2 });
+    }
     return { clicked: !holdMs, actionDispatched: true, mode: 'dom', trusted: false };
   }
 
@@ -669,10 +872,21 @@
         .filter(item => visible(item) && !item.matches(':disabled') && item.tabIndex >= 0);
       const index = targets.indexOf(element), next = modifiers.shiftKey ? (index <= 0 ? targets.length - 1 : index - 1) : (index + 1) % targets.length;
       targets[next]?.focus();
-    } else if (allowed && key === 'Enter' && element instanceof HTMLInputElement && element.form) {
-      element.form.requestSubmit();
-    } else if (allowed && ['Enter', 'Space'].includes(key) && element.matches('button,a[href],input[type=checkbox],input[type=radio]')) {
+    } else if (allowed && ((key === 'Enter' && element instanceof HTMLInputElement && ['button', 'submit', 'reset', 'image'].includes(element.type)) ||
+        (['Enter', 'Space'].includes(key) && element.matches('button,a[href],input[type=checkbox],input[type=radio]')))) {
       element.click();
+    } else if (allowed && key === 'Enter' && element instanceof HTMLInputElement && IMPLICIT_SUBMIT_INPUTS.has(element.type) && element.form) {
+      const form = element.form;
+      // 包含form属性关联的外部按钮和不在form.elements中的image，按文档顺序保留默认submitter。
+      const controls = [...document.querySelectorAll('button,input')].filter(control => control.form === form);
+      const submitter = controls.find(control => (control.tagName === 'BUTTON' && control.type === 'submit') ||
+        (control instanceof HTMLInputElement && ['submit', 'image'].includes(control.type)));
+      if (submitter) {
+        // 禁用的默认按钮阻止隐式提交；click保留取消处理器和name/value、formaction等原生语义。
+        if (!submitter.matches(':disabled')) submitter.click();
+      } else if (controls.filter(control => control instanceof HTMLInputElement && IMPLICIT_SUBMIT_INPUTS.has(control.type)).length <= 1) {
+        form.requestSubmit();
+      }
     } else if (allowed && ['Backspace', 'Delete'].includes(key) && typeof element.setRangeText === 'function') {
       const start = element.selectionStart, end = element.selectionEnd;
       if (start !== null && !element.readOnly) {
@@ -715,7 +929,7 @@
     domPress: guarded('domPress', domPress)
   };
 
-  Object.defineProperty(globalThis, '__aiBrowserPageAgent7', {
+  Object.defineProperty(globalThis, '__aiBrowserPageAgent8', {
     value: Object.freeze(agent),
     configurable: false,
     writable: false

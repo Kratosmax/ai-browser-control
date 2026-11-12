@@ -130,7 +130,7 @@ try:
             page.evaluate('scrollTo(0,600)')
             page.locator('#b').evaluate("e=>e.style.left='180px'")
             js = isolated(page, old)
-            agent = '__zcodeTabAgent' if old else '__aiBrowserPageAgent7'
+            agent = '__zcodeTabAgent' if old else '__aiBrowserPageAgent8'
             snap = js(f'{agent}.snapshot()')
             refs = [item['ref'] for item in snap['elements'] if item['tag'] == 'button']
             points = [js(f'{agent}.prepare({json.dumps(ref)})') for ref in refs]
@@ -221,9 +221,9 @@ try:
           trigger.textContent='保持测试';trigger.setAttribute('aria-haspopup','menu');trigger.setAttribute('aria-controls','qa-fading-menu');
           trigger.style.cssText='position:fixed;left:20px;top:20px';menu.id='qa-fading-menu';menu.setAttribute('role','menu');
           menu.textContent='测试选项';menu.style.cssText='position:fixed;left:20px;top:80px;opacity:1;transition:opacity 120ms';
-          document.body.append(trigger,menu);const snap=await __aiBrowserPageAgent7.snapshot({load:'current'});
-          const ref=snap.elements.find(e=>e.name==='保持测试').ref;const p=await __aiBrowserPageAgent7.prepare(ref);
-          await __aiBrowserPageAgent7.showCursor({...p,animate:false,hideMs:1000});await __aiBrowserPageAgent7.domHover({ref,point:p});
+          document.body.append(trigger,menu);const snap=await __aiBrowserPageAgent8.snapshot({load:'current'});
+          const ref=snap.elements.find(e=>e.name==='保持测试').ref;const p=await __aiBrowserPageAgent8.prepare(ref);
+          await __aiBrowserPageAgent8.showCursor({...p,animate:false,hideMs:1000});await __aiBrowserPageAgent8.domHover({ref,point:p});
           const held=__aiBrowserCursor2.state().held;menu.style.opacity='0';await new Promise(r=>setTimeout(r,350));
           const after=__aiBrowserCursor2.state().held;trigger.remove();menu.remove();return {held,after};})()''')
         assert fade_hold == {'held': True, 'after': False}
@@ -250,14 +250,14 @@ try:
         assert elapsed['elapsed'] < 50 and elapsed['result']['animated'] is False
         check('后台分支不等待动画（可见性模拟）', elapsed)
 
-        snap = js('__aiBrowserPageAgent7.snapshot()')
+        snap = js('__aiBrowserPageAgent8.snapshot()')
         text_ref = next(item['ref'] for item in snap['elements'] if item['name'] == '测试输入')
-        result = js('__aiBrowserPageAgent7.domFill(' + json.dumps({'ref': text_ref, 'text': 'DOM 模式输入成功'}) + ')')
+        result = js('__aiBrowserPageAgent8.domFill(' + json.dumps({'ref': text_ref, 'text': 'DOM 模式输入成功'}) + ')')
         assert result.get('filled')
         assert page.locator('#text').input_value() == 'DOM 模式输入成功'
         assert {item['type'] for item in page.evaluate('events')} == {'input', 'change'}
         button_ref = next(item['ref'] for item in snap['elements'] if item['name'] == '左侧操作')
-        js(f'__aiBrowserPageAgent7.domClick({json.dumps(button_ref)})')
+        js(f'__aiBrowserPageAgent8.domClick({json.dumps(button_ref)})')
         assert page.locator('output').inner_text() == '1'
         check('真实 DOM 填表/点击及 input/change 事件', page.evaluate('events'))
 
@@ -275,12 +275,12 @@ try:
             '<div role="dialog" style="position:fixed;inset:0;background:#0008;display:grid;place-items:center"><button onclick="this.parentElement.remove()">我知道了</button></div>';
         }''')
         modal_js = isolated(modal_page)
-        modal_snap = modal_js('__aiBrowserPageAgent7.snapshot()')
+        modal_snap = modal_js('__aiBrowserPageAgent8.snapshot()')
         close_ref = next(item['ref'] for item in modal_snap['elements'] if item['tag'] == 'button' and item['name'] == '我知道了')
         assert len(modal_snap['elements']) == 150
         assert modal_snap['coverage']['selectionPriority'] == 'viewport-first'
         modal_page.screenshot(path=str(OUT / 'viewport-modal.png'))
-        modal_js('__aiBrowserPageAgent7.domClick(' + json.dumps(close_ref) + ')')
+        modal_js('__aiBrowserPageAgent8.domClick(' + json.dumps(close_ref) + ')')
         assert modal_page.locator('[role=dialog]').count() == 0
         check('180个离屏控件后仍可定位并关闭屏内弹窗', modal_snap['coverage'])
         modal_page.close()

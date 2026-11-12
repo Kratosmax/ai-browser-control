@@ -6,6 +6,9 @@ const authorized = new Set();
 // 已附加调试器的标签页：只有写入类命令（点击/输入/截屏）需要，读取不附加——无提示条、无 CDP 痕迹。
 const attached = new Set();
 const revoked = new Set();
+const revocationTouched = new Set();
+let revocationSaving = Promise.resolve();
+const cdpGeneration = { input: 0, screenshot: 0 };
 const detaching = new Set();
 const tabQueues = new Map();
 const completed = new Map();
@@ -52,6 +55,15 @@ const taskTabs = new AiBrowserTasks(chrome, tabId => runningTabs.has(tabId), asy
 });
 const domFallbackTabs = new Set();
 let pendingResult = null;
+// 为桥的12MiB请求体上限预留JSON封装余量；单结果与批次统一按UTF-8字节计算。
+const RESULT_MAX_BYTES = 10 * 1024 * 1024;
+const resultBytes = value => new TextEncoder().encode(JSON.stringify(value)).byteLength;
+function resultError(id, code, message) {
+  return { id, error: { code, message, outcome: 'unverified' } };
+}
+function boundedResult(payload) {
+  return resultBytes(payload) <= RESULT_MAX_BYTES ? payload : resultError(payload.id, 'RESULT_TOO_LARGE', '结果超过10MiB字节上限，已丢弃内容；动作不会重放，请回读确认。');
+}
 let bridgeState = '未连接';
 let bridgeFailures = 0;
 // 唤醒轮询循环：连接/断开后立即生效，不等退避睡眠结束。
@@ -66,8 +78,26 @@ let diagnosticTimer = null;
 let diagnosticSending = null;
 let diagnosticSaving = false;
 
+const PAGE_RESULT_ERROR_CODES = new Set(["PAGE_AGENT_EMPTY_RESULT","PAGE_AGENT_NO_RESULT","PAGE_AGENT_INVALID_RESULT","PAGE_AGENT_API_ERROR","PAGE_AGENT_NOT_READY","PAGE_AGENT_METHOD_MISSING","PAGE_AGENT_SYNC_THROW","PAGE_AGENT_PROMISE_REJECTED","PAGE_AGENT_SERIALIZE_FAILED","PAGE_AGENT_DOCUMENT_CHANGED","PAGE_AGENT_FRAME_MISMATCH","PAGE_AGENT_INVALID_OPERATION","PAGE_ACTION_FAILED","INVALID_PARAMS","INVALID_ARGUMENTS","STALE_REF","REF_EXPIRED","STALE_CURSOR","SNAPSHOT_CHANGED","ELEMENT_NOT_VISIBLE","TARGET_CHANGED","ELEMENT_DISABLED","AMBIGUOUS_TARGET","TARGET_OUTSIDE_VIEWPORT","ELEMENT_OBSCURED","UNSUPPORTED_TARGET","UNSUPPORTED_ACTION"]);
+
+// 固定白名单也用于工具错误回执；绝不携带页面内容或原始异常正文。
+function pageResultDiagnostic(value) {
+  const out = {};
+  if (!value || typeof value !== 'object') return out;
+  for (const key of ['resultCount', 'frameId']) {
+    if (Number.isSafeInteger(value[key]) && value[key] >= 0) out[key] = value[key];
+  }
+  for (const key of ['agentPresent', 'documentChanged']) if (typeof value[key] === 'boolean') out[key] = value[key];
+  if (['inject', 'invoke', 'decode', 'serialize'].includes(value.stage)) out.stage = value.stage;
+  if (['null', 'undefined', 'object', 'array', 'number', 'string', 'boolean'].includes(value.resultKind)) out.resultKind = value.resultKind;
+  if (['envelope', 'legacy', 'empty', 'no-result', 'api-error'].includes(value.transportKind)) out.transportKind = value.transportKind;
+  if (PAGE_RESULT_ERROR_CODES.has(value.errorCode)) out.errorCode = value.errorCode;
+  if (['Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'EvalError', 'URIError', 'AggregateError', 'DOMException', 'other'].includes(value.exceptionKind)) out.exceptionKind = value.exceptionKind;
+  return out;
+}
+
 function diagnosticRecord(value) {
-  const record = {};
+  const record = pageResultDiagnostic(value);
   for (const key of ['time', 'seq', 'epoch', 'port', 'tabId', 'durationMs', 'status', 'retryMs']) {
     if (Number.isSafeInteger(value?.[key]) && value[key] >= 0) record[key] = value[key];
   }
@@ -143,7 +173,11 @@ function loopSleep(ms) {
   });
 }
 
-const ready = chrome.storage.local.get(['autoAuthorize', 'bridgePort', 'cdpEnabled', 'screenshotCdpEnabled', 'cursorHideSec', 'cursorTrailSec', 'disconnected', 'diagnosticLog']).then((stored) => {
+const ready = Promise.all([
+  chrome.storage.local.get(['autoAuthorize', 'bridgePort', 'cdpEnabled', 'screenshotCdpEnabled', 'cursorHideSec', 'cursorTrailSec', 'disconnected', 'diagnosticLog']),
+  chrome.storage.session.get('revokedTabIds')
+]).then(([stored, session]) => {
+  for (const id of session.revokedTabIds || []) if (Number.isInteger(id) && id >= 0 && !revocationTouched.has(id)) revoked.add(id);
   autoAuthorize = stored.autoAuthorize === true;
   cdpEnabled = stored.cdpEnabled === true;
   screenshotCdpEnabled = stored.screenshotCdpEnabled !== false;
@@ -158,6 +192,16 @@ const ready = chrome.storage.local.get(['autoAuthorize', 'bridgePort', 'cdpEnabl
   diagnosticPending = diagnosticLog.slice();
   diagnostic('worker_start');
 });
+
+function setRevoked(tabId, value) {
+  revocationTouched.add(tabId);
+  if (value) revoked.add(tabId); else revoked.delete(tabId);
+  revocationSaving = revocationSaving.catch(() => {}).then(async () => {
+    await ready;
+    await chrome.storage.session.set({ revokedTabIds: [...revoked] });
+  });
+  return revocationSaving;
+}
 
 function isHttpUrl(url) {
   try {
@@ -197,79 +241,183 @@ async function ensureAllowed(tabId, check = () => {}) {
 }
 
 // 写入类命令（点击/输入/截屏）才附加调试器；首次写入时才出现提示条。
-async function ensureAttached(tabId, purpose = 'input', check = () => {}) {
-  const tab = await ensureAllowed(tabId, check);
-  if (purpose === 'screenshot' ? !screenshotCdpEnabled : !cdpEnabled) {
-    throw new Error(purpose === 'screenshot' ? '截图 CDP 已关闭' : 'CDP 真实交互已关闭，不能调用真实输入协议');
+function checkCdpPermission(tabId, purpose, generation) {
+  if (generation !== cdpGeneration[purpose] || (purpose === 'screenshot' ? !screenshotCdpEnabled : !cdpEnabled)) {
+    throw Object.assign(new Error(purpose === 'screenshot' ? '截图 CDP 已关闭或授权已变化' : 'CDP 真实交互已关闭或授权已变化'), { code: 'CDP_DISABLED' });
   }
+  if (revoked.has(tabId) || (!authorized.has(tabId) && !autoAuthorize)) throw new Error('该标签页已释放或授权已变化');
+}
+
+async function ensureAttached(tabId, purpose = 'input', check = () => {}) {
+  const generation = cdpGeneration[purpose];
+  const tab = await ensureAllowed(tabId, check);
+  checkCdpPermission(tabId, purpose, generation);
   if (!attached.has(tabId)) {
-    await browserStep(check, 'debugger.attach', () => chrome.debugger.attach({ tabId }, '1.3'));
-    attached.add(tabId);
+    try {
+      await browserStep(check, 'debugger.attach', async () => {
+        await chrome.debugger.attach({ tabId }, '1.3');
+        attached.add(tabId);
+      });
+      checkCdpPermission(tabId, purpose, generation);
+    } catch (error) {
+      if (attached.has(tabId)) { try { await detach(tabId); } catch {} }
+      throw error;
+    }
   }
   return tab;
 }
 
 async function cdp(tabId, method, params = {}, check = () => {}) {
   check();
-  await ensureAttached(tabId, method === 'Page.captureScreenshot' ? 'screenshot' : 'input', check);
+  const purpose = method === 'Page.captureScreenshot' ? 'screenshot' : 'input';
+  const generation = cdpGeneration[purpose];
+  await ensureAttached(tabId, purpose, check);
   check();
-  return browserStep(check, method, () => chrome.debugger.sendCommand({ tabId }, method, params));
+  return browserStep(check, method, () => {
+    checkCdpPermission(tabId, purpose, generation);
+    return chrome.debugger.sendCommand({ tabId }, method, params);
+  });
 }
 
+const PAGE_METHODS = Object.freeze(['snapshot', 'scroll', 'inspect', 'prepare', 'focus', 'focusTarget',
+  'showCursor', 'holdHover', 'cursorPulse', 'hideCursor', 'domClick', 'domHover', 'pointerClick',
+  'domDrag', 'select', 'waitFor', 'domFill', 'domPress']);
+const PAGE_RPC_PROTOCOL = 'ai-browser-page-rpc-v1';
+const pageResultKind = value => value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+
 async function pageAgent(tabId, operation, ref, check = () => {}) {
+  const report = (stage, fields = {}) => diagnostic('page_result', { ...check.diagnostic, outcome: fields.outcome, ...pageResultDiagnostic({ ...fields, stage }) });
+  const fail = (code, message, fields) => {
+    const detail = pageResultDiagnostic({ ...fields, errorCode: code });
+    report(detail.stage || 'decode', { ...detail, outcome: 'error' });
+    throw Object.assign(new Error(message), { code, diagnostic: detail });
+  };
+  const apiFailure = (error, stage) => {
+    if (['invalidated', 'timeout'].includes(error?.code)) throw error;
+    fail('PAGE_AGENT_API_ERROR', String(error?.message ?? error), {
+      stage, transportKind: 'api-error', exceptionKind: pageExceptionKind(error)
+    });
+  };
+  if (!PAGE_METHODS.includes(operation)) fail('PAGE_AGENT_INVALID_OPERATION', '不支持的页面操作', { stage: 'invoke' });
   check();
   await ensureAllowed(tabId, check);
   check();
-  await browserStep(check, 'scripting.inject', () => chrome.scripting.executeScript({
-    target: { tabId },
-    world: 'ISOLATED',
-    files: ['cursor.js', 'page-agent.js']
-  }));
+  let injected;
+  try {
+    injected = await browserStep(check, 'scripting.inject', () => chrome.scripting.executeScript({
+      target: { tabId }, world: 'ISOLATED', files: ['cursor.js', 'page-agent.js']
+    }));
+  } catch (error) { apiFailure(error, 'inject'); }
+  const injectionMeta = { stage: 'inject', resultCount: Array.isArray(injected) ? injected.length : undefined };
+  if (!Array.isArray(injected) || injected.length !== 1 || !injected[0] || typeof injected[0] !== 'object' || Array.isArray(injected[0])) {
+    fail('PAGE_AGENT_NO_RESULT', '页面代理注入未返回预期的主文档元数据', { ...injectionMeta, transportKind: 'no-result' });
+  }
+  if (injected[0].error) apiFailure(injected[0].error, 'inject');
+  if (Number.isSafeInteger(injected[0].frameId) && injected[0].frameId !== 0) fail('PAGE_AGENT_FRAME_MISMATCH', '页面代理注入返回的框架不是主框架', { ...injectionMeta, frameId: injected[0].frameId });
+  report('inject', { ...injectionMeta, frameId: injected[0].frameId, outcome: 'ok' });
   check();
   await ensureAllowed(tabId, check);
   check();
-  const results = await browserStep(check, operation, () => chrome.scripting.executeScript({
-    target: { tabId },
-    world: 'ISOLATED',
-    func: (name, elementRef) => {
-      const agent = globalThis.__aiBrowserPageAgent7;
-      if (!agent) throw new Error('页面代理未就绪');
-      if (name === 'snapshot') return agent.snapshot(elementRef);
-      if (name === 'scroll') return agent.scroll(elementRef);
-      if (name === 'inspect') return agent.inspect(elementRef);
-      if (name === 'prepare') return agent.prepare(elementRef);
-      if (name === 'focus') return agent.focus(elementRef);
-      if (name === 'focusTarget') return agent.focusTarget(elementRef);
-      if (name === 'showCursor') return agent.showCursor(elementRef);
-      if (name === 'holdHover') return agent.holdHover(elementRef);
-      if (name === 'cursorPulse') return agent.cursorPulse(elementRef);
-      if (name === 'hideCursor') return agent.hideCursor();
-      if (name === 'domClick') return agent.domClick(elementRef);
-      if (name === 'domHover') return agent.domHover(elementRef);
-      if (name === 'pointerClick') return agent.pointerClick(elementRef);
-      if (name === 'domDrag') return agent.domDrag(elementRef);
-      if (name === 'select') return agent.select(elementRef);
-      if (name === 'waitFor') return agent.waitFor(elementRef);
-      if (name === 'domFill') return agent.domFill(elementRef);
-      if (name === 'domPress') return agent.domPress(elementRef);
-      throw new Error('不支持的页面操作');
-    },
-    args: [operation, ref ?? null]
-  }));
-  if (!results.length) throw new Error('页面代理没有返回结果');
+  let results;
+  try {
+    results = await browserStep(check, operation, () => chrome.scripting.executeScript({
+      // Chrome提供documentId时锁定注入的同一文档，避免页面导航后把操作派到新文档。
+      target: { tabId, ...(typeof injected[0].documentId === 'string' && injected[0].documentId ? { documentIds: [injected[0].documentId] } : {}) },
+      world: 'ISOLATED',
+      // 显式 async/await 在注入边界捕获；兼容已安装的 agent8，不依赖其 guarded 包装。
+      func: async (name, elementRef) => {
+        const protocol = 'ai-browser-page-rpc-v1';
+        const safeCodes = new Set(["PAGE_AGENT_EMPTY_RESULT","PAGE_AGENT_NO_RESULT","PAGE_AGENT_INVALID_RESULT","PAGE_AGENT_API_ERROR","PAGE_AGENT_NOT_READY","PAGE_AGENT_METHOD_MISSING","PAGE_AGENT_SYNC_THROW","PAGE_AGENT_PROMISE_REJECTED","PAGE_AGENT_SERIALIZE_FAILED","PAGE_AGENT_DOCUMENT_CHANGED","PAGE_AGENT_FRAME_MISMATCH","PAGE_AGENT_INVALID_OPERATION","PAGE_ACTION_FAILED","INVALID_PARAMS","INVALID_ARGUMENTS","STALE_REF","REF_EXPIRED","STALE_CURSOR","SNAPSHOT_CHANGED","ELEMENT_NOT_VISIBLE","TARGET_CHANGED","ELEMENT_DISABLED","AMBIGUOUS_TARGET","TARGET_OUTSIDE_VIEWPORT","ELEMENT_OBSCURED","UNSUPPORTED_TARGET","UNSUPPORTED_ACTION"]);
+        const kind = value => value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+        let agentPresent = false;
+        const errorEnvelope = (code, error, stage, extra = {}) => {
+          let message = '页面代理执行失败';
+          let exceptionKind = 'other';
+          try { message = String(error?.message ?? error ?? message); } catch {}
+          try {
+            if (['Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'EvalError', 'URIError', 'AggregateError', 'DOMException'].includes(error?.name)) exceptionKind = error.name;
+          } catch {}
+          return { protocol, ok: false, error: { code, message }, diagnostic: { stage, agentPresent, exceptionKind, ...extra } };
+        };
+        try {
+          const methods = ['snapshot', 'scroll', 'inspect', 'prepare', 'focus', 'focusTarget', 'showCursor',
+            'holdHover', 'cursorPulse', 'hideCursor', 'domClick', 'domHover', 'pointerClick', 'domDrag',
+            'select', 'waitFor', 'domFill', 'domPress'];
+          if (!methods.includes(name)) return errorEnvelope('PAGE_AGENT_INVALID_OPERATION', '不支持的页面操作', 'invoke');
+          const agent = globalThis.__aiBrowserPageAgent8;
+          agentPresent = !!agent;
+          if (!agent) return errorEnvelope('PAGE_AGENT_NOT_READY', '页面代理未就绪', 'invoke');
+          if (typeof agent[name] !== 'function') return errorEnvelope('PAGE_AGENT_METHOD_MISSING', '页面代理缺少所需方法', 'invoke');
+          let pending;
+          try { pending = name === 'hideCursor' ? agent[name]() : agent[name](elementRef); }
+          catch (error) { return errorEnvelope('PAGE_AGENT_SYNC_THROW', error, 'invoke'); }
+          let payload;
+          try { payload = await pending; }
+          catch (error) { return errorEnvelope('PAGE_AGENT_PROMISE_REJECTED', error, 'invoke'); }
+          if (payload && typeof payload === 'object' && '__zcodeError' in payload) {
+            const code = safeCodes.has(payload.__zcodeCode) ? payload.__zcodeCode : 'PAGE_ACTION_FAILED';
+            return errorEnvelope(code, payload.__zcodeError, 'invoke');
+          }
+          const resultKind = kind(payload);
+          if (payload === null || payload === undefined) return errorEnvelope('PAGE_AGENT_EMPTY_RESULT', '页面代理业务结果为空', 'serialize', { resultKind });
+          if (typeof payload !== 'object' || Array.isArray(payload)) return errorEnvelope('PAGE_AGENT_INVALID_RESULT', '页面代理业务结果类型异常', 'serialize', { resultKind: ['number', 'string', 'boolean', 'array'].includes(resultKind) ? resultKind : undefined });
+          try {
+            // 先实际序列化再反序列化，防止 Chrome 在传输循环引用/BigInt/toJSON 异常时仅回传空值。
+            const safePayload = JSON.parse(JSON.stringify(payload));
+            if (!safePayload || typeof safePayload !== 'object' || Array.isArray(safePayload)) return errorEnvelope('PAGE_AGENT_INVALID_RESULT', '页面代理序列化结果类型异常', 'serialize', { resultKind: kind(safePayload) });
+            return { protocol, ok: true, payload: safePayload, diagnostic: { stage: 'serialize', agentPresent, resultKind: 'object' } };
+          } catch (error) { return errorEnvelope('PAGE_AGENT_SERIALIZE_FAILED', error, 'serialize', { resultKind }); }
+        } catch (error) { return errorEnvelope('PAGE_AGENT_SYNC_THROW', error, 'invoke'); }
+      },
+      args: [operation, ref ?? null]
+    }));
+  } catch (error) {
+    if (typeof injected[0].documentId === 'string' && /No document with id/i.test(String(error?.message ?? ''))) {
+      fail('PAGE_AGENT_DOCUMENT_CHANGED', '原页面文档已不可用，未向新文档重试操作；原因需结合现场确认', { stage: 'invoke', transportKind: 'api-error', documentChanged: true });
+    }
+    apiFailure(error, 'invoke');
+  }
+  const meta = { stage: 'decode', resultCount: Array.isArray(results) ? results.length : undefined };
+  report('invoke', { resultCount: meta.resultCount, outcome: 'ok' });
+  if (!Array.isArray(results)) fail('PAGE_AGENT_INVALID_RESULT', '页面代理传输结果不是数组', { ...meta, transportKind: 'no-result', resultKind: pageResultKind(results) });
+  if (!results.length) fail('PAGE_AGENT_NO_RESULT', '页面代理传输没有返回结果条目', { ...meta, transportKind: 'no-result' });
+  if (results.length !== 1 || !results[0] || typeof results[0] !== 'object' || Array.isArray(results[0])) fail('PAGE_AGENT_INVALID_RESULT', '页面代理传输结果条目结构异常', { ...meta, transportKind: 'no-result' });
   const outcome = results[0];
-  // Edge 对页面内抛错可能返回 result:null 而不是 reject，必须把真实原因带出来。
-  if (outcome.error) {
-    const detail = typeof outcome.error === 'object' ? outcome.error.message : String(outcome.error);
-    throw new Error(`页面代理执行失败：${detail}`);
+  meta.frameId = outcome.frameId;
+  if (typeof injected[0].documentId === 'string' && typeof outcome.documentId === 'string') meta.documentChanged = injected[0].documentId !== outcome.documentId;
+  if (meta.documentChanged) fail('PAGE_AGENT_DOCUMENT_CHANGED', '页面代理注入与调用返回的文档不一致；调用结果不确定', meta);
+  if ((Number.isSafeInteger(injected[0].frameId) && Number.isSafeInteger(outcome.frameId) && injected[0].frameId !== outcome.frameId) || (Number.isSafeInteger(outcome.frameId) && outcome.frameId !== 0)) fail('PAGE_AGENT_FRAME_MISMATCH', '页面代理注入与调用返回的框架不一致；调用结果不确定', meta);
+  if (outcome.error) fail('PAGE_AGENT_API_ERROR', String(outcome.error?.message ?? outcome.error), { ...meta, transportKind: 'api-error', exceptionKind: pageExceptionKind(outcome.error) });
+  if (!Object.prototype.hasOwnProperty.call(outcome, 'result')) fail('PAGE_AGENT_NO_RESULT', '页面代理传输条目缺少 result 字段', { ...meta, transportKind: 'no-result' });
+  const value = outcome.result;
+  meta.resultKind = pageResultKind(value);
+  if (value === null || value === undefined) fail('PAGE_AGENT_EMPTY_RESULT', '页面代理传输返回空结果，原因尚未确定', { ...meta, transportKind: 'empty' });
+  if (typeof value !== 'object' || Array.isArray(value)) fail('PAGE_AGENT_INVALID_RESULT', '页面代理传输结果类型异常', { ...meta, transportKind: 'legacy' });
+  if (Object.prototype.hasOwnProperty.call(value, 'protocol')) {
+    meta.transportKind = 'envelope';
+    if (value.protocol !== PAGE_RPC_PROTOCOL || typeof value.ok !== 'boolean') fail('PAGE_AGENT_INVALID_RESULT', '页面代理协议结构异常', meta);
+    report('decode', { ...meta, outcome: 'ok' });
+    const detail = { ...meta, ...pageResultDiagnostic(value.diagnostic) };
+    if (!value.ok) {
+      const code = PAGE_RESULT_ERROR_CODES.has(value.error?.code) ? value.error.code : 'PAGE_AGENT_INVALID_RESULT';
+      fail(code, typeof value.error?.message === 'string' ? value.error.message : '页面代理错误协议结构异常', detail);
+    }
+    if (!value.payload || typeof value.payload !== 'object' || Array.isArray(value.payload)) fail('PAGE_AGENT_INVALID_RESULT', '页面代理协议缺少有效业务结果', detail);
+    report('serialize', { ...detail, outcome: 'ok' });
+    return value.payload;
   }
-  if (outcome.result && typeof outcome.result === 'object' && '__zcodeError' in outcome.result) {
-    throw Object.assign(new Error(`页面代理执行失败：${outcome.result.__zcodeError}`), { code: outcome.result.__zcodeCode || 'PAGE_ACTION_FAILED' });
+  // 仅兼容旧传输夹具/回执；真实 func 始终生成上面的固定 envelope。
+  meta.transportKind = 'legacy';
+  if ('__zcodeError' in value) {
+    const code = PAGE_RESULT_ERROR_CODES.has(value.__zcodeCode) ? value.__zcodeCode : 'PAGE_ACTION_FAILED';
+    fail(code, String(value.__zcodeError), meta);
   }
-  if (outcome.result === undefined || outcome.result === null) {
-    throw new Error('页面代理未返回结果：目标可能已不可见或被遮挡，请重新 snapshot');
-  }
-  return outcome.result;
+  report('decode', { ...meta, outcome: 'ok' });
+  return value;
+}
+
+function pageExceptionKind(error) {
+  return ['Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'EvalError', 'URIError', 'AggregateError', 'DOMException'].includes(error?.name) ? error.name : 'other';
 }
 
 const KEYS = Object.freeze({
@@ -342,6 +490,9 @@ async function listTabs(check = () => {}) {
     managed: taskTabs.tabs.has(tab.id),
     taskId: taskTabs.tabs.get(tab.id)?.taskId,
     taskName: taskTabs.tabs.get(tab.id)?.name,
+    provenance: taskTabs.tabs.get(tab.id)?.provenance,
+    evidence: taskTabs.tabs.get(tab.id)?.evidence,
+    keep: taskTabs.tabs.get(tab.id)?.keep,
     groupId: tab.groupId,
     authorized: !revoked.has(tab.id) && (authorized.has(tab.id) || autoAuthorize),
     inputMode: useCdp ? 'cdp' : 'dom',
@@ -361,7 +512,7 @@ async function release(tabId, check = () => {}) {
   if (attached.has(tabId)) await detach(tabId, check);
   authorized.delete(tabId);
   attached.delete(tabId);
-  revoked.add(tabId);
+  await setRevoked(tabId, true);
   return { released: true, tabId };
 }
 
@@ -413,12 +564,16 @@ async function execute(command, check = () => {}) {
   if (method === 'batch') {
     const results = await Promise.all(params.commands.map(async (item, index) => {
       try { return { ok: true, result: await executeBounded({ id: `${command.id}-${index}`, ...item }, check) }; }
-      catch (error) { return { ok: false, error: { code: error.code || 'BROWSER_ACTION_FAILED', message: errorMessage(error), outcome: 'unverified' } }; }
+      catch (error) {
+        const diagnostic = pageResultDiagnostic(error.diagnostic);
+        return { ok: false, error: { code: error.code || 'BROWSER_ACTION_FAILED', message: errorMessage(error), outcome: 'unverified',
+          commandId: String(command.id) + '-' + index, ...(Object.keys(diagnostic).length ? { diagnostic } : {}) } };
+      }
     }));
     let bytes = 0;
     for (let index = 0; index < results.length; index++) {
-      const size = JSON.stringify(results[index]).length;
-      if (bytes + size > 10 * 1024 * 1024) results[index] = { ok: false, error: { code: 'RESULT_TOO_LARGE', message: '本批次图像过大，请单独截图该页；其他结果保留', outcome: 'unverified' } };
+      const size = resultBytes(results[index]);
+      if (bytes + size > RESULT_MAX_BYTES - 4096) results[index] = { ok: false, error: { code: 'RESULT_TOO_LARGE', message: '本批次图像过大，请单独截图该页；其他结果保留', outcome: 'unverified' } };
       else bytes += size;
     }
     return { results };
@@ -457,7 +612,7 @@ async function execute(command, check = () => {}) {
     };
     const send = (method, params) => cdp(tabId, method, params, check);
     const cleanupUp = async (point, button = 'left', clickCount = 1) => {
-      if (attached.has(tabId)) await bounded(chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent',
+      if (attached.has(tabId) && cdpEnabled && !revoked.has(tabId)) await bounded(chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent',
         { type: 'mouseReleased', x: point.x, y: point.y, button, buttons: 0, clickCount }), 1000, '释放鼠标等待超时');
     };
     const dispatched = extra => ({ actionDispatched: true, outcome: 'unverified',
@@ -499,7 +654,8 @@ async function execute(command, check = () => {}) {
     if (['fill', 'select', 'set_checked', 'drag', 'press'].includes(method)) taskTabs.markModified(tabId);
     switch (method) {
       case 'snapshot':
-        return { ...await agent('snapshot', { load: params.load ?? 'auto' }),
+        return { ...await agent('snapshot', { load: params.load ?? (params.cursor ? 'current' : 'auto'),
+            ...Object.fromEntries(['name', 'role', 'context', 'exact', 'scope', 'scopeRef', 'cursor', 'limit'].filter(key => Object.hasOwn(params, key)).map(key => [key, params[key]])) }),
           verificationHint: 'DOM有遮挡、身份歧义、截断或状态矛盾时，先browser_screenshot核对可见结果；截图不能证明未加载数据完整。' };
       case 'scroll':
         return agent('scroll', { direction: params.direction, ref: params.ref });
@@ -810,8 +966,15 @@ async function pollLoop() {
         try {
           await bridgeFetch('/result', payload);
         } catch (error) {
-          // 404：结果已过期或被桥消费，直接丢弃；其余错误按断线重试。
-          if (error?.status !== 404) throw error;
+          // 认证/占用/限流等暂态错误保留结果重传；无效请求不可永久堵住poll。
+          const terminal = error?.status >= 400 && error.status < 500 && ![401, 403, 408, 409, 425, 429].includes(error.status);
+          if (!terminal) throw error;
+          if (error.status !== 404 && payload.error?.code !== 'RESULT_REJECTED') {
+            const rejected = resultError(payload.id, 'RESULT_REJECTED', '桥拒绝结果(HTTP ' + error.status + ')，原内容已丢弃；动作不会重放，请回读确认。');
+            remember(payload.id, rejected);
+            if (pendingResult === payload) pendingResult = rejected;
+            return;
+          }
         }
         current();
         if (pendingResult === payload) pendingResult = null;
@@ -839,8 +1002,9 @@ async function pollLoop() {
         try {
           payload = { id: command.id, result: await executeBounded(command) };
         } catch (error) {
-          payload = { id: command.id, error: { message: errorMessage(error), code: error.code === 'timeout' ? 'COMMAND_TIMEOUT' : error.code === 'invalidated' ? 'CONNECTION_INVALIDATED' : error.code || 'BROWSER_ACTION_FAILED', outcome: 'unverified' } };
+          payload = { id: command.id, error: { message: errorMessage(error), code: error.code === 'timeout' ? 'COMMAND_TIMEOUT' : error.code === 'invalidated' ? 'CONNECTION_INVALIDATED' : error.code || 'BROWSER_ACTION_FAILED', outcome: 'unverified', ...(error.diagnostic ? { diagnostic: pageResultDiagnostic(error.diagnostic) } : {}) } };
         }
+        payload = boundedResult(payload);
         remember(command.id, payload);
       }
       current();
@@ -897,12 +1061,14 @@ async function handlePopup(message) {
       return { cursorHideSec: sec };
     }
     case 'set_cdp_enabled': {
+      cdpGeneration.input++;
       cdpEnabled = message.enabled === true;
       await chrome.storage.local.set({ cdpEnabled });
       if (!cdpEnabled) await detachAll();
       return { cdpEnabled };
     }
     case 'set_screenshot_cdp_enabled': {
+      cdpGeneration.screenshot++;
       screenshotCdpEnabled = message.enabled === true;
       await chrome.storage.local.set({ screenshotCdpEnabled });
       if (!screenshotCdpEnabled && !cdpEnabled) await detachAll();
@@ -958,7 +1124,7 @@ async function handlePopup(message) {
         if (!isHttpUrl(tab.url)) throw new Error('只能授权 HTTP(S) 标签页');
         // 只登记授权；调试器延迟到首个写入命令才附加（读取全程无提示条）。
         authorized.add(tab.id);
-        revoked.delete(tab.id);
+        await setRevoked(tab.id, false);
         return { authorized: true, tabId: tab.id };
       });
     case 'release_tab':
@@ -982,10 +1148,11 @@ chrome.debugger.onDetach.addListener((source) => {
   attached.delete(source.tabId);
   if (!detaching.has(source.tabId)) {
     authorized.delete(source.tabId);
-    revoked.add(source.tabId);
+    void setRevoked(source.tabId, true).catch(() => {});
   }
 });
-chrome.tabs.onRemoved.addListener((tabId) => { authorized.delete(tabId); attached.delete(tabId); revoked.delete(tabId); domFallbackTabs.delete(tabId); taskTabs.removed(tabId); });
+chrome.webNavigation?.onCreatedNavigationTarget.addListener(event => { void taskTabs.created(event); });
+chrome.tabs.onRemoved.addListener((tabId) => { authorized.delete(tabId); attached.delete(tabId); void setRevoked(tabId, false).catch(() => {}); domFallbackTabs.delete(tabId); taskTabs.removed(tabId); });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === ALARM) startPolling();
 });

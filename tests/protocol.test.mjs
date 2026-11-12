@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { validateCommand, tools } from '../server/protocol.mjs';
+import { validateCommand, tools, METHODS } from '../server/protocol.mjs';
 
 test('交互参数覆盖ref按键、等待、分裂按钮、拖拽与状态设置，并拒绝无界或含糊请求', () => {
   for (const [method, params] of [
@@ -41,4 +41,44 @@ test('任务与多页批量参数严格校验；批次拒绝嵌套、同页与�
     { commands: [{ method: 'snapshot', params: { tabId: 7, script: 'arbitrary' } }] },
     { commands: Array.from({ length: 5 }, (_, tabId) => ({ method: 'snapshot', params: { tabId } })) }
   ]) assert.throws(() => validateCommand('batch', params), { code: 'INVALID_ARGUMENTS' });
+});
+
+test('MCP重载只在本地管理层暴露，不进入浏览器桥或batch', () => {
+  const restart = tools.find(tool => tool.name === 'browser_restart');
+  assert(restart);
+  assert.deepEqual(restart.inputSchema.properties, {});
+  assert.equal(restart.inputSchema.additionalProperties, false);
+  assert(!METHODS.includes('restart'));
+  assert.throws(() => validateCommand('restart', {}), { code: 'UNSUPPORTED_METHOD' });
+  assert.throws(() => validateCommand('batch', { commands: [{ method: 'restart', params: {} }] }), { code: 'INVALID_ARGUMENTS' });
+});
+
+test('按页结束与补登记必须提供对应参数、精确身份和创建记录', () => {
+  const page = { tabId: 7, url: 'https://example.test/done', groupId: -1, evidence: { kind: 'agent-created', reference: '会话中browser_open回执tabId=7' } };
+  validateCommand('task', { taskId: 'billing', action: 'close', tabIds: [7] });
+  validateCommand('task', { taskId: 'billing', action: 'unkeep', tabIds: [7] });
+  validateCommand('task', { taskId: 'billing', action: 'adopt', taskName: '账单', pages: [page] });
+  for (const params of [
+    { taskId: 'billing', action: 'close' }, { taskId: 'billing', action: 'close', tabIds: [] },
+    { taskId: 'billing', action: 'close', tabIds: [7], keepTabIds: [8] },
+    { taskId: 'billing', action: 'list', tabIds: [7] },
+    { taskId: 'billing', action: 'adopt', pages: [page] },
+    { taskId: 'billing', action: 'adopt', taskName: '账单', pages: [{ ...page, evidence: undefined }] },
+    { taskId: 'billing', action: 'adopt', taskName: '账单', pages: [page, page] },
+    { taskId: 'billing', action: 'adopt', taskName: '账单', pages: [{ ...page, url: 'file:///private' }] },
+    { taskId: 'billing', action: 'adopt', taskName: '账单', pages: [{ ...page, evidence: { ...page.evidence, reference: '   ' } }] }
+  ]) assert.throws(() => validateCommand('task', params), { code: 'INVALID_ARGUMENTS' });
+});
+
+test('快照目标查询与游标续页参数互斥且有界', () => {
+  for (const params of [
+    { tabId: 7, name: '下载', role: 'button', exact: true, context: '账单', scope: 'main', limit: 50, load: 'current' },
+    { tabId: 7, scopeRef: 'r1-2', name: '下载' },
+    { tabId: 7, cursor: 'opaque-continuation', format: 'compact', load: 'current' }
+  ]) validateCommand('snapshot', params);
+  for (const extra of [
+    { exact: true }, { name: ' ' }, { role: '' }, { scope: 'unknown' }, { limit: 151 }, { limit: 0 },
+    { scopeRef: 'r1-2', scope: 'all' }, { cursor: 'opaque', name: '下载' }, { cursor: 'opaque', limit: 150 },
+    { cursor: 'opaque', load: 'auto' }
+  ]) assert.throws(() => validateCommand('snapshot', { tabId: 7, ...extra }), { code: 'INVALID_ARGUMENTS' });
 });
