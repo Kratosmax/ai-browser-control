@@ -30,7 +30,7 @@ export const tools = [
     { ...target, values: { type: 'array', minItems: 1, maxItems: 50, uniqueItems: true, items: { type: 'string', maxLength: 1000 } } }, ['tabId', 'ref', 'values']),
   tool('set_checked', '幂等设置checkbox/radio或ARIA checkbox/radio/switch，已为目标状态时不点击。原生radio不能单独取消；返回实际状态。点击可能触发业务操作，仍须遵守用户授权。', { ...target, checked: { type: 'boolean' } }, ['tabId', 'ref', 'checked']),
   tool('inspect', '读取最近ref的可见/禁用/焦点/勾选/选中/展开/弹层/遮挡和原生select选项等状态，不执行动作。身份变化时明确标记，不把旧ref当作新目标。style/最多6层ancestors/hitTarget/hitTest.status辅助核对透明与遮挡；未采样或命中为空不证明可点，不修改样式。', { tabId, ref }, ['tabId', 'ref']),
-  tool('wait', '有条件等待可见/隐藏/启用/展开/收起，最长5秒；ref或text或精确name(可配role)至少一个，ref不能与其他选择条件混用。返回matched而不是把等待超时当作动作失败；不滚动、不更新已有refs。',
+  tool('wait', '有条件等待可见/隐藏/启用/展开/收起，最长5秒；ref或text或精确name(可配role)至少一个，ref不能与其他选择条件混用。返回matched而不是把等待超时当作动作失败；后台计时、页面逐次即时探测，冻结/换文档会停止，旧挂起不重放。5秒是条件预算，已派发原生调用挂起仍受总期限和页锁保护；不滚动、不更新已有refs。',
     { tabId, ref, text: { type: 'string', minLength: 1, maxLength: 1000 }, name: { type: 'string', minLength: 1, maxLength: 1000 }, role: { type: 'string', minLength: 1, maxLength: 64 }, state: { type: 'string', enum: ['visible', 'hidden', 'enabled', 'expanded', 'collapsed'] }, timeoutMs: { type: 'integer', minimum: 0, maximum: 5000 } }, ['tabId']),
   tool('fill', '替换文本框或可编辑元素内容，不提交；完成后回读验证。', { tabId, ref, text: { type: 'string', maxLength: 100000 } }, ['tabId', 'ref', 'text']),
   tool('press', '可先按ref聚焦，再发送按键/组合键。Enter、Control+Enter可能提交表单，必须遵守用户授权；DOM按键不保证浏览器默认行为。', { ...target, key: { type: 'string', enum: PRESS_KEYS } }, ['tabId', 'key']),

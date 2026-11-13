@@ -231,3 +231,14 @@ test('callback queued past its deadline cannot enter a page write method', async
   assert.equal(vm.runInContext('calls', h.page), 0);
   assert.equal(h.scripts.filter(spec => spec.func).length, 1);
 });
+
+test('delayed wait page callback honors condition budget separately from outer deadline', async () => {
+  const h=await harness('globalThis.calls=0;globalThis.__aiBrowserPageAgent8={waitFor(){calls++;return {matched:true}}}');
+  await h.call('waitFor',{state:'visible',timeoutMs:0});
+  const spec=h.scripts.find(item=>item.func);
+  vm.runInContext('calls=0',h.page);
+  h.page.__args=['waitFor',{state:'visible',timeoutMs:0},Date.now()+10000,Date.now()-1];
+  const response=await vm.runInContext('('+spec.func.toString()+')(...__args)',h.page);
+  assert.equal(response.ok,true); assert.equal(response.payload.matched,false); assert.equal(response.payload.timedOut,true);
+  assert.equal(vm.runInContext('calls',h.page),0);
+});

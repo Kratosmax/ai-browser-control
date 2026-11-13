@@ -247,6 +247,11 @@ async function ensureAllowed(tabId, check = () => {}) {
   check.lifecycle = pageResultDiagnostic({ tabStatus: tab.status, frozen: tab.frozen, discarded: tab.discarded });
   if (!isHttpUrl(tab.url)) throw new Error('仅允许操作 HTTP(S) 标签页');
   if (revoked.has(tabId) || (!authorized.has(tabId) && !autoAuthorize)) throw new Error('该标签页尚未手动授权或已释放，请在弹窗中授权此页');
+  if (check.waitIdentity && (tab.url !== check.waitIdentity.url || tab.windowId !== check.waitIdentity.windowId)) {
+    throw Object.assign(new Error('等待期间目标页面已变化，未向新页面继续探测'), {
+      code: 'PAGE_AGENT_DOCUMENT_CHANGED', diagnostic: pageResultDiagnostic({stage:'preflight',phase:'tabs.get',...check.lifecycle,documentChanged:true,errorCode:'PAGE_AGENT_DOCUMENT_CHANGED'})
+    });
+  }
   return tab;
 }
 
@@ -402,6 +407,52 @@ const PAGE_METHODS = Object.freeze(['snapshot', 'scroll', 'inspect', 'prepare', 
 const PAGE_RPC_PROTOCOL = 'ai-browser-page-rpc-v1';
 const pageResultKind = value => value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
 
+// 等待时钟在扩展后台运行；页面仅做timeoutMs=0即时探测，避免冻结暂停页面计时器。
+async function waitForCondition(tabId, params, check, agent) {
+  const started = Date.now();
+  const timeoutMs = params.timeoutMs ?? 3000;
+  const deadline = started + timeoutMs;
+  check.waitConditionDeadline = timeoutMs > 0 ? deadline : null;
+  check.waitLastCount = 0;
+  const initial = await ensureAllowed(tabId, check);
+  check.waitIdentity = { url: initial.url, windowId: initial.windowId };
+  const verifyCurrent = async () => {
+    const tab = await ensureAllowed(tabId, check);
+    check();
+    ensurePageRunnable(tab, check);
+  };
+  let last;
+  while (true) {
+    check();
+    last = await agent('waitFor', { ...params, timeoutMs: 0 });
+    check();
+    await verifyCurrent();
+    if (!last || typeof last.matched !== 'boolean') throw Object.assign(new Error('等待即时探测回传无效'), { code: 'PAGE_AGENT_INVALID_RESULT' });
+    check.waitLastCount = last.count ?? 0;
+    const elapsedMs = Date.now() - started;
+    // 只接受请求期限内完成的匹配；单次timeout=0仍允许一次即时观察。
+    const matched = last.matched && (timeoutMs === 0 || elapsedMs <= timeoutMs);
+    if (matched || elapsedMs >= timeoutMs) return { ...last, matched, elapsedMs, timedOut: !matched };
+    if (check.waitDocumentId === null) throw Object.assign(new Error('浏览器未提供原文档标识，未继续跨轮等待'), {
+      code:'PAGE_AGENT_DOCUMENT_CHANGED', diagnostic:pageResultDiagnostic({stage:'preflight',phase:check.phase,documentChanged:true,errorCode:'PAGE_AGENT_DOCUMENT_CHANGED'})
+    });
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return { ...last, elapsedMs: Date.now() - started, timedOut: true };
+    await new Promise(resolve => setTimeout(resolve, Math.min(100, remaining)));
+    check();
+    // 到达请求期限后不再下发页面探测；不是一次新的业务动作或超时重试。
+    if (Date.now() >= deadline) {
+      await verifyCurrent();
+      return { ...last, elapsedMs: Date.now() - started, timedOut: true };
+    }
+  }
+}
+
+function expiredWaitObservation(operation, params, check) {
+  return operation === 'waitFor' && Number.isFinite(check.waitConditionDeadline) && Date.now() >= check.waitConditionDeadline
+    ? {matched:false,state:params?.state ?? 'visible',count:check.waitLastCount ?? 0,elapsedMs:0,timedOut:true} : null;
+}
+
 async function pageAgent(tabId, operation, ref, check = () => {}) {
   const report = (stage, fields = {}) => diagnostic('page_result', { ...check.diagnostic, outcome: fields.outcome, ...pageResultDiagnostic({ ...fields, stage }) });
   const fail = (code, message, fields) => {
@@ -417,25 +468,44 @@ async function pageAgent(tabId, operation, ref, check = () => {}) {
   };
   if (!PAGE_METHODS.includes(operation)) fail('PAGE_AGENT_INVALID_OPERATION', '不支持的页面操作', { stage: 'invoke' });
   check();
-  await ensureReadablePage(await ensureAllowed(tabId, check), check);
+  const initialTab = await ensureReadablePage(await ensureAllowed(tabId, check), check);
+  if (check.waitIdentity && (initialTab.url !== check.waitIdentity.url || initialTab.windowId !== check.waitIdentity.windowId)) {
+    fail('PAGE_AGENT_DOCUMENT_CHANGED', '等待期间页面目标已变化，未向新页面继续探测', { stage: 'invoke', documentChanged: true });
+  }
   check();
+  const expiredBeforeInject = expiredWaitObservation(operation, ref, check);
+  if (expiredBeforeInject) return expiredBeforeInject;
   let injected;
   try {
     injected = await browserStep(check, 'scripting.inject', () => chrome.scripting.executeScript({
       // load=current读取已经存在的DOM，不等待页面document_idle；长连接/慢资源不应阻塞注入。
-      target: { tabId }, world: 'ISOLATED', injectImmediately: true, files: ['cursor.js', 'page-agent.js']
+      target: { tabId, ...(typeof check.waitDocumentId === 'string' ? {documentIds:[check.waitDocumentId]} : {}) }, world: 'ISOLATED', injectImmediately: true, files: ['cursor.js', 'page-agent.js']
     }));
-  } catch (error) { apiFailure(error, 'inject'); }
+  } catch (error) {
+    if (typeof check.waitDocumentId === 'string' && /No document with id/i.test(String(error?.message ?? ''))) {
+      fail('PAGE_AGENT_DOCUMENT_CHANGED', '等待原文档已不存在，未转向新文档重试', {stage:'inject',documentChanged:true});
+    }
+    apiFailure(error, 'inject');
+  }
   const injectionMeta = { stage: 'inject', resultCount: Array.isArray(injected) ? injected.length : undefined };
   if (!Array.isArray(injected) || injected.length !== 1 || !injected[0] || typeof injected[0] !== 'object' || Array.isArray(injected[0])) {
     fail('PAGE_AGENT_NO_RESULT', '页面代理注入未返回预期的主文档元数据', { ...injectionMeta, transportKind: 'no-result' });
   }
   if (injected[0].error) apiFailure(injected[0].error, 'inject');
   if (Number.isSafeInteger(injected[0].frameId) && injected[0].frameId !== 0) fail('PAGE_AGENT_FRAME_MISMATCH', '页面代理注入返回的框架不是主框架', { ...injectionMeta, frameId: injected[0].frameId });
+  if (check.waitIdentity) {
+    const documentId = typeof injected[0].documentId === 'string' && injected[0].documentId ? injected[0].documentId : null;
+    if (check.waitDocumentId !== undefined && check.waitDocumentId !== documentId) {
+      fail('PAGE_AGENT_DOCUMENT_CHANGED', '等待期间原文档已变化，未调用新文档页面方法', { stage: 'invoke', documentChanged: true });
+    }
+    check.waitDocumentId = documentId;
+  }
   report('inject', { ...injectionMeta, frameId: injected[0].frameId, outcome: 'ok' });
   check();
   await ensureReadablePage(await ensureAllowed(tabId, check), check);
   check();
+  const expiredBeforeInvoke = expiredWaitObservation(operation, ref, check);
+  if (expiredBeforeInvoke) return expiredBeforeInvoke;
   let results;
   try {
     check.pageWorkStarted = true;
@@ -444,7 +514,7 @@ async function pageAgent(tabId, operation, ref, check = () => {}) {
       target: { tabId, ...(typeof injected[0].documentId === 'string' && injected[0].documentId ? { documentIds: [injected[0].documentId] } : {}) },
       world: 'ISOLATED', injectImmediately: true,
       // 显式 async/await 在注入边界捕获；兼容已安装的 agent8，不依赖其 guarded 包装。
-      func: async (name, elementRef, deadline) => {
+      func: async (name, elementRef, deadline, conditionDeadline) => {
         const protocol = 'ai-browser-page-rpc-v1';
         const safeCodes = new Set(["PAGE_AGENT_EMPTY_RESULT","PAGE_AGENT_NO_RESULT","PAGE_AGENT_INVALID_RESULT","PAGE_AGENT_API_ERROR","PAGE_AGENT_NOT_READY","PAGE_AGENT_METHOD_MISSING","PAGE_AGENT_SYNC_THROW","PAGE_AGENT_PROMISE_REJECTED","PAGE_AGENT_SERIALIZE_FAILED","PAGE_AGENT_DOCUMENT_CHANGED","PAGE_AGENT_FRAME_MISMATCH","PAGE_AGENT_INVALID_OPERATION","PAGE_AGENT_COMMAND_EXPIRED","TAB_FROZEN","TAB_DISCARDED","PAGE_WAKE_FAILED","PAGE_WAKE_TIMEOUT","CDP_DISABLED","PAGE_ACTION_FAILED","INVALID_PARAMS","INVALID_ARGUMENTS","STALE_REF","REF_EXPIRED","STALE_CURSOR","SNAPSHOT_CHANGED","ELEMENT_NOT_VISIBLE","TARGET_CHANGED","ELEMENT_DISABLED","AMBIGUOUS_TARGET","TARGET_OUTSIDE_VIEWPORT","ELEMENT_OBSCURED","UNSUPPORTED_TARGET","UNSUPPORTED_ACTION"]);
         const kind = value => value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
@@ -469,6 +539,9 @@ async function pageAgent(tabId, operation, ref, check = () => {}) {
           agentPresent = !!agent;
           if (!agent) return errorEnvelope('PAGE_AGENT_NOT_READY', '页面代理未就绪', 'invoke');
           if (typeof agent[name] !== 'function') return errorEnvelope('PAGE_AGENT_METHOD_MISSING', '页面代理缺少所需方法', 'invoke');
+          if (name === 'waitFor' && Number.isFinite(conditionDeadline) && Date.now() >= conditionDeadline) {
+            return {protocol,ok:true,payload:{matched:false,state:elementRef?.state ?? 'visible',count:0,elapsedMs:0,timedOut:true},diagnostic:{stage:'serialize',agentPresent,resultKind:'object'}};
+          }
           let pending;
           try { pending = name === 'hideCursor' ? agent[name]() : agent[name](elementRef); }
           catch (error) { return errorEnvelope('PAGE_AGENT_SYNC_THROW', error, 'invoke'); }
@@ -490,7 +563,7 @@ async function pageAgent(tabId, operation, ref, check = () => {}) {
           } catch (error) { return errorEnvelope('PAGE_AGENT_SERIALIZE_FAILED', error, 'serialize', { resultKind }); }
         } catch (error) { return errorEnvelope('PAGE_AGENT_SYNC_THROW', error, 'invoke'); }
       },
-      args: [operation, ref ?? null, Number.isFinite(check.deadline) ? check.deadline : null]
+      args: [operation, ref ?? null, Number.isFinite(check.deadline) ? check.deadline : null, Number.isFinite(check.waitConditionDeadline) ? check.waitConditionDeadline : null]
     }));
   } catch (error) {
     if (typeof injected[0].documentId === 'string' && /No document with id/i.test(String(error?.message ?? ''))) {
@@ -795,7 +868,7 @@ async function execute(command, check = () => {}) {
       case 'inspect':
         return agent('inspect', params.ref);
       case 'wait':
-        return agent('waitFor', params);
+        return waitForCondition(tabId, params, check, agent);
       case 'focus': {
         await prepareTarget(params.ref, params.expectedContext);
         await agent('focusTarget', params.ref);

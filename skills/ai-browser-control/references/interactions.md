@@ -28,7 +28,7 @@
 - 原生select先inspect读取value选项，再select(values=[...])；多选可传多个值。已达到目标状态则不重复派发。自绘下拉框仍走菜单流程，不用select冒充支持。
 - set_checked对checkbox/radio/ARIA switch等按目标布尔状态幂等操作；已符合时changed=false。原生radio不能单独取消。verified只确认读取到的控件状态，不代表业务已保存；自绘组件延迟更新仍需wait/snapshot回读。
 - inspect可读不可见/禁用节点和identityChanged；出现身份变化时重新snapshot，不操作旧ref。快照每批最多150个ref，可用目标查询和cursor分页；编号变化按对应错误流程处理。
-- wait可用ref或text或精确name+role，ref不与其他条件混用。ref等待不刷新快照；等待隐藏时移除或不可见可匹配，节点复用成另一身份则报错。wait不自动滚动；name可能重复，返回count不是唯一性证明。
+- wait可用ref或text或精确name+role，ref不与其他条件混用。ref等待不刷新快照；等待隐藏时移除或不可见可匹配，节点复用成另一身份则报错。wait不自动滚动；name可能重复，返回count不是唯一性证明。0.17.2起由扩展后台计时、页面每轮仅即时探测，复用原ref并绑定原文档，不通过snapshot刷新引用。条件期限内未匹配是matched=false/timedOut=true正常结果；不是工具故障或动作未发生证明。等待中再次冻结、丢弃、目标/权限变化时停止；不要反复等待同一旧挂起命令。5秒是条件观察预算，单次已派发的原生调用仍可能挂起并触发11秒总期限，届时原操作锁保留到实际结束，不能据此重放。
 - 拖拽必须核对fromRef/toRef各自业务身份，两个目标同时在同一主文档视口。DOM支持合成指针与HTML5 DataTransfer；CDP为真实指针拖动，不保证任意HTML5组件。动作结束会释放按键；结果未知先回读，不自动重放。
 
 ## 加载、白色覆盖与透明区域
