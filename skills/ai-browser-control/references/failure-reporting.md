@@ -2,6 +2,12 @@
 
 适用于使用ai-browser-control办理业务的agent；维护者受用户明确委托排障时可以在保全现场后开展只读诊断与隔离复现。不要把维护排障授权解释为继续办理原业务。
 
+## 0.17.3的处理指引与加载状态
+
+工作进程返回的浏览器错误和失败批次项追加recovery：category/action/instruction、maintenanceRequired、保守outcome及automaticReplay=false。先按它区分引用/身份漂移、歧义/页面状态、权限、冻结、旧操作运行中和内部/传输异常；未分类时保留首错交接，不凭消息关键词猜根因。它不是自动执行命令、扩大权限或重放动作的授权，不能覆盖用户业务边界。启动器管理/JSONRPC层或旧版本可能没有recovery，不能据此忽略错误，仍按code/outcome和下方流程处理。outcome=unverified时始终先核对已派发部分，不把建议重新定位理解为重做原写入。普通matched=false仍是正常条件结果。
+
+browser_status.versionHealth仅检查MCP/桥/扩展是否对齐，状态unknown保持未知；launcherHealth独立检查启动器已加载代码。browser_restart只更新worker，启动器过期需由宿主MCP断开重连；旧启动器没有观测信息时不能按磁盘版本冒充加载成功。连接或版本正常也不证明原页面无operation。
+
 ## 首次发现时立即执行
 
 1. 第一次出现工具不可用就停止依赖该能力的业务，立即用一句话告诉用户：“浏览器插件的某能力不可用，已停止相关操作，正在整理故障报告。”不要先花几分钟反复重试再汇报。

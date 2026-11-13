@@ -180,7 +180,7 @@ async function fixture(t) {
         requests.push(item);
         for (const check of [...arrivals]) check();
         if (url.pathname === '/rpc' ? !holdRpc : !holdCandidate) {
-          json(response, url.pathname === '/rpc' ? { result: { acknowledged: true } } : { ready: true });
+          json(response, url.pathname === '/rpc' ? { result: body?.method === 'list_tabs' ? [] : { acknowledged: true } } : { ready: true });
         }
         return;
       }
@@ -393,7 +393,7 @@ test('new business calls are rejected with MCP_RESTARTING until candidate ready'
   changed(before, after);
   assert.equal(after.pid, candidate.pid);
   await assertExited(before.pid);
-  assert.deepEqual(payload(await f.client.call('browser_list_tabs')), { acknowledged: true });
+  assert.deepEqual(payload(await f.client.call('browser_list_tabs')), []);
   assert.deepEqual(f.requests.filter(item => item.route === '/rpc').map(item => item.body.method), ['list_tabs'], 'rejected action must never be queued/replayed');
 });
 

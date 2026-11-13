@@ -80,7 +80,7 @@ export function diagnosticEvent(value) {
   for (const key of ['session', 'commandId']) {
     if (typeof value[key] === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(value[key])) out[key] = value[key];
   }
-  if (/^\d+\.\d+\.\d+$/.test(value.version)) out.version = value.version;
+  if (typeof value.version === 'string' && /^\d+\.\d+\.\d+$/.test(value.version)) out.version = value.version;
   if (METHODS.has(value.method)) out.method = value.method;
   if (PHASES.has(value.phase)) out.phase = value.phase;
   if (['ok', 'error', 'timeout', 'invalidated', 'busy'].includes(value.outcome)) out.outcome = value.outcome;

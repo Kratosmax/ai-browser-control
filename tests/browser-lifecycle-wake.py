@@ -206,11 +206,13 @@ def main():
               and state(ids['frozen-a']).get('frozen') is False and elapsed < 11, snapshot=snapshot, elapsed=elapsed)
         verify_wake_trace(calls_since(start), ids['frozen-a'])
         button_ref = next(e['ref'] for e in snapshot['elements'] if e.get('role') == 'button' and e.get('name') == 'Healthy control')
-        for method, params in [('inspect', {'ref': button_ref}), ('wait', {'name': 'Healthy control', 'role': 'button', 'timeoutMs': 100})]:
+        for method, params in [('inspect', {'ref': button_ref}), ('wait', {'name': 'Healthy control', 'role': 'button', 'timeoutMs': 5000})]:
             freeze('frozen-a')
             start = js('qaCalls.length')
             response, payload, _ = tool('browser_' + method, {'tabId': ids['frozen-a'], **params})
             check('Real MCP fresh ' + method + ' automatically thaws', not response.get('isError') and state(ids['frozen-a']).get('frozen') is False, payload=payload)
+            if method == 'wait':
+                assert payload.get('matched') is True, payload
             verify_wake_trace(calls_since(start), ids['frozen-a'])
         start = js('qaCalls.length')
         response, _, _ = tool('browser_snapshot', {'tabId': ids['frozen-a'], 'load': 'current'})

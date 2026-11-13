@@ -277,7 +277,7 @@ function checkCdpPermission(tabId, purpose, generation) {
 }
 
 async function ensureAttached(tabId, purpose = 'input', check = () => {}) {
-  const generation = cdpGeneration[purpose];
+  const generation = check.cdpGeneration?.[purpose] ?? cdpGeneration[purpose];
   const tab = await ensureAllowed(tabId, check);
   checkCdpPermission(tabId, purpose, generation);
   if (!attached.has(tabId)) {
@@ -287,6 +287,7 @@ async function ensureAttached(tabId, purpose = 'input', check = () => {}) {
         attached.add(tabId);
         if (purpose === 'lifecycle') lifecycleAttachments.add(tabId);
       });
+      check();
       checkCdpPermission(tabId, purpose, generation);
     } catch (error) {
       if (attached.has(tabId)) { try { await detach(tabId); } catch {} }
@@ -300,19 +301,23 @@ async function ensureAttached(tabId, purpose = 'input', check = () => {}) {
 async function cdp(tabId, method, params = {}, check = () => {}) {
   check();
   const purpose = method === 'Page.captureScreenshot' ? 'screenshot' : 'input';
-  const generation = cdpGeneration[purpose];
+  const generation = check.cdpGeneration?.[purpose] ?? cdpGeneration[purpose];
   await ensureAttached(tabId, purpose, check);
   check();
-  return browserStep(check, method, () => {
+  const result = await browserStep(check, method, () => {
     checkCdpPermission(tabId, purpose, generation);
     return chrome.debugger.sendCommand({ tabId }, method, params);
   });
+  // 原生调用期间撤权/换连接后，迟到回传不能续派动作或发布旧截图。
+  check();
+  checkCdpPermission(tabId, purpose, generation);
+  return result;
 }
 
 // 只为新读取命令尝试一次；不唤醒已有悬挂命令，也不扩展点击/截图权限。
 async function wakeFrozenPage(tab, check) {
   const tabId = tab.id;
-  const generation = cdpGeneration.lifecycle;
+  const generation = check.cdpGeneration?.lifecycle ?? cdpGeneration.lifecycle;
   const started = Date.now();
   const wasAttached = attached.has(tabId);
   check.wakeAttempted = true;
@@ -535,7 +540,7 @@ async function pageAgent(tabId, operation, ref, check = () => {}) {
           if (!methods.includes(name)) return errorEnvelope('PAGE_AGENT_INVALID_OPERATION', '不支持的页面操作', 'invoke');
           // Chrome回调可能在期限后才开始；进入页面方法前拒绝，不能让迟到回调执行写入。
           if (Number.isFinite(deadline) && Date.now() >= deadline) return errorEnvelope('PAGE_AGENT_COMMAND_EXPIRED', '页面操作已过期，未调用页面方法', 'invoke');
-          const agent = globalThis.__aiBrowserPageAgent9 || globalThis.__aiBrowserPageAgent8;
+          const agent = globalThis.__aiBrowserPageAgent10 || globalThis.__aiBrowserPageAgent9 || globalThis.__aiBrowserPageAgent8;
           agentPresent = !!agent;
           if (!agent) return errorEnvelope('PAGE_AGENT_NOT_READY', '页面代理未就绪', 'invoke');
           if (typeof agent[name] !== 'function') return errorEnvelope('PAGE_AGENT_METHOD_MISSING', '页面代理缺少所需方法', 'invoke');
@@ -818,8 +823,9 @@ async function execute(command, check = () => {}) {
     };
     const send = (method, params) => cdp(tabId, method, params, check);
     const cleanupUp = async (point, button = 'left', clickCount = 1) => {
-      if (attached.has(tabId) && cdpEnabled && !revoked.has(tabId)) await bounded(chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent',
-        { type: 'mouseReleased', x: point.x, y: point.y, button, buttons: 0, clickCount }), 1000, '释放鼠标等待超时');
+      // 外层期限仅结束回执；原生释放未结束前继续持有同页锁，不能用内层race提前解锁。
+      if (attached.has(tabId) && cdpEnabled && !revoked.has(tabId)) await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent',
+        { type: 'mouseReleased', x: point.x, y: point.y, button, buttons: 0, clickCount });
     };
     const dispatched = extra => ({ actionDispatched: true, outcome: 'unverified',
       mode: useCdp ? 'cdp' : 'dom', trusted: useCdp, fallbackReason,
@@ -847,8 +853,8 @@ async function execute(command, check = () => {}) {
         try { await ensureAttached(tabId, 'input', check); domFallbackTabs.delete(tabId); }
         catch (error) {
           check();
-          if (params.mode === 'cdp') throw error;
-          // 仅在输入尚未派发时降级。执行阶段失败不能重放点击/提交。
+          if (params.mode === 'cdp' || error.code === 'CDP_DISABLED') throw error;
+          // 仅能力附加失败且输入尚未派发时降级；撤权/执行阶段失败不能重放。
           if (attached.has(tabId)) await detach(tabId, check);
           await ensureAllowed(tabId, check);
           useCdp = false;
@@ -1105,6 +1111,8 @@ async function executeBounded(command, parentCheck = () => {}) {
   const started = Date.now();
   const check = () => { parentCheck(); if (expired || epoch !== connectionEpoch || wantDisconnect) throw Object.assign(new Error('原操作已过期或连接已变化，未继续派发动作；已派发部分结果不确定。'), { code: 'invalidated' }); };
   check.diagnostic = meta;
+  // 每个新命令固定各用途授权代次；中途关闭再开启不能为旧命令续期。
+  check.cdpGeneration = { ...cdpGeneration };
   check.phase = 'queue';
   check.deadline = isBatch ? undefined : started + 11000;
   diagnostic('command_start', meta);

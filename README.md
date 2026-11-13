@@ -2,7 +2,9 @@
 
 让支持 MCP 的 AI 助手按标签页读取和操作真实 Edge / Chrome。后台操作不切换标签页、不移动系统鼠标。
 
-当前版本：0.17.2。条件等待改为扩展后台计时、页面逐次即时探测，避免页面内轮询计时器在冻结后持续挂起。等待绑定原页面/文档并复核权限、生命周期和条件期限，超时未匹配正常返回；不取消或重放已派发原生调用，旧挂起仍保留页锁。保持独立后台唤醒、候选定位及动作授权边界。本仓库提供源码，不另设此版本的 GitHub Release。
+当前版本：0.17.3。系统性加固原生清理锁、权限代次、截图回传、DOM/表单身份与拖拽阶段校验，以及RPC畸形结果和启动器超时结算。新增固定可靠性验收入口、机器可读故障处理指引、版本与启动器加载状态检查。通过表示列明场景已验证，不代表所有网站无缺陷；不自动重放业务或更改用户权限。本仓库提供源码，不另设此版本的 GitHub Release。
+
+本版更新了MCP启动器：在宿主MCP管理中断开并重连，再到浏览器扩展管理页重载扩展，使本版全部生效。browser_restart仅重载worker；launcherHealth未知或过期时不能声称启动器已更新。无需为此刷新业务网页，新的Agent10与旧代理并存并要求重新snapshot取新引用。
 
 ## 开始使用
 
@@ -99,7 +101,7 @@ browser_batch一次最多4个不同tabId，支持快照、截图及交互，返�
 
 0.17.1返回candidateKind：semantic为原有语义候选，custom-control为有点击处理器或指针样式证据的自绘项，native-cell为原生td/th内容。角色仍按DOM实际属性返回，没有role的月份单元格为generic，不伪造成button或option。普通静态表格单元格也可读取并定位，但不是已证实的按钮；操作依赖用户意图、上下文与回读。普通无标记静态正文不会因此全部获得ref。未暴露语义/处理器/样式的委托事件div仍可能无法识别，不保证所有框架控件。
 
-重复名称的generic/单元格必须传expectedContext；月份title中的年份会补入context。选择同一动作的嵌套表示时收敛被动包装，独立onclick及原生/ARIA动作仍保留。同轮分页保持ref稳定，相关候选变化拒绝续页；150仍只限制每批返回量。inspect增加固定样式、最多6层祖先、采样命中节点与hitTest.status，不读HTML/框架内部对象，不修改样式/遮罩。Agent9可与不可覆盖的旧Agent8并存，新后台优先9，升级后重新snapshot。
+重复名称的generic/单元格必须传expectedContext；月份title中的年份会补入context。选择同一动作的嵌套表示时收敛被动包装，独立onclick及原生/ARIA动作仍保留。同轮分页保持ref稳定，相关候选变化拒绝续页；150仍只限制每批返回量。inspect增加固定样式、最多6层祖先、采样命中节点与hitTest.status，不读HTML/框架内部对象，不修改样式/遮罩。Agent10可与不可覆盖的旧Agent9/8并存，新后台优先10，升级后重新snapshot；表单/控件类型、提交归属和目标、ARIA关联等动作语义变化会令旧引用失效。原生命名表单控件遮住DOM方法时采用原型回退，不序列化密码或DOM节点。
 
 ### 有界条件等待
 
@@ -227,7 +229,16 @@ node test-page/serve.mjs
 
 测试页为 `http://127.0.0.1:17654/`，只写入页面内存。若 17654 已用于其他桥，先停用对应测试服务或换一个独立测试入口，不覆盖现有服务。
 
-自动化回归：
+固定发布验收（详见[可靠性矩阵与故障处理](RELIABILITY.md)）：
+
+```powershell
+node scripts/check-reliability.mjs --all --dry-run
+node scripts/check-reliability.mjs --all
+```
+
+默认不带参数或--unit运行全部源码单元文件；--native运行4个已审计的私有Edge套件。前置缺失、漏测目录、崩溃、超时、失败或中断均不能判成完成通过；输出精确清单、产品版本、Git状态和阶段日志。dry-run只验证计划/前置，不是用例通过。新增源码测试自动发现，不把temp历史夹具算进发布测试。
+
+单独调试的既有回归命令：
 
 ```powershell
 node --test tests/bridge.test.mjs tests/install.test.mjs tests/diagnostics.test.mjs tests/protocol.test.mjs tests/supervisor.test.mjs extension/tests/mock.test.cjs extension/tests/expired-result.test.cjs extension/tests/tasks.test.cjs extension/tests/page-interactions.test.cjs extension/tests/task-recovery.test.cjs extension/tests/snapshot-query.test.cjs extension/tests/page-rpc.test.cjs extension/tests/batch-timeout.test.cjs extension/tests/lifecycle-wake.test.cjs extension/tests/custom-controls.test.cjs extension/tests/background-wait.test.cjs extension/tests/background-wait-boundaries.test.cjs tests/mcp-restart.test.mjs tests/snapshot-format.test.mjs
@@ -242,13 +253,19 @@ python -B tests/browser-custom-controls.py --source current --label local-check
 python -B tests/browser-wait-lifecycle.py
 ```
 
-Python 项仅供开发验收，依赖测试机已有 Python Playwright、Pillow 和 Edge；browser-frozen.py和browser-lifecycle-wake.py另需已有websocket-client以便只连接私有测试浏览器、不自动附加页面。不属于运行时依赖，不自动安装或复制全局工具。UI 对照测试还需要 Git 历史中的基线提交（见 REQUIREMENTS.md）；纯 ZIP 没有该历史时无法生成旧版对照。它们使用独立临时浏览器配置和测试桥，不控制用户的标签页。证据输出到 `temp/qa/`。无 CDP 截图正向夹具的额外权限与正式清单不同，具体限制在测试记录中明确列出。
+Python 项仅供开发验收，依赖测试机已有 Python Playwright、Pillow 和 Edge；browser-frozen.py、browser-lifecycle-wake.py和browser-wait-lifecycle.py另需已有websocket-client以便只连接私有测试浏览器、不自动附加页面。不属于运行时依赖，不自动安装或复制全局工具。UI 对照测试还需要 Git 历史中的基线提交（见 REQUIREMENTS.md）；纯 ZIP 没有该历史时无法生成旧版对照。它们使用独立临时浏览器配置和测试桥，不控制用户的标签页。证据输出到 `temp/qa/`。无 CDP 截图正向夹具的额外权限与正式清单不同，具体限制在测试记录中明确列出。
 
 本地预览包放在 `temp/ai-browser-control-local-preview.zip`；这是源码预览，不是正式 Release。解压后可加载其中的 `extension` 目录，不包含 Node 或浏览器副本。
 
+## 故障结果与版本检查
+
+工作进程返回的浏览器错误及失败批次项含recovery分类、固定下一步、maintenanceRequired、保守outcome和automaticReplay=false；文字宿主也能看到处理建议。引用/身份变化、页面状态、生命周期、旧操作运行中与内部回传异常分开处理。它不是新的业务授权；未知结果先核对并保留首错，不盲目重载或重放。启动器管理/JSONRPC层错误可能仅有稳定code/outcome，缺少recovery不代表正常，仍按对应错误和现场状态处理。
+
+browser_status.versionHealth给出MCP/桥/扩展与已知磁盘目标的aligned/mismatch/unknown及固定nextActions，不能以版本对齐/connected/pending=0代替页面可用性。launcherHealth独立核对启动器实际加载代码；hostReconnectRequired为true/false/null，旧宿主无法提供信息时保留unknown。无已加载worker时mcpVersion=null、initialize版本unknown，磁盘版本只列于mcpDiskVersion。
+
 ## 给后续 AI
 
-先读 [REQUIREMENTS.md](REQUIREMENTS.md)，用户原话决定范围；再看 [AGENT-INTEGRATION.md](AGENT-INTEGRATION.md) 和最新测试记录。不要把历史 agent 的推断升级为用户需求。
+先读 [REQUIREMENTS.md](REQUIREMENTS.md)，用户原话决定范围；再看 [AGENT-INTEGRATION.md](AGENT-INTEGRATION.md)、[固定可靠性矩阵](RELIABILITY.md)和最新测试记录。不要把历史 agent 的推断升级为用户需求。
 
 随插件分发的浏览器操作规范在 [skills/ai-browser-control/SKILL.md](skills/ai-browser-control/SKILL.md)。跨站点的懒加载、虚拟列表、分页、列表结束判断及动作验收见 [动态列表流程](skills/ai-browser-control/references/dynamic-lists.md)；接入 agent 应读取该文件，不依赖当前聊天或某台机器的本地规则。
 

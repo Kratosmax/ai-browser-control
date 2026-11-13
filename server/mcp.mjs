@@ -2,11 +2,34 @@
 import readline from 'node:readline';
 import fs from 'node:fs';
 import { fork } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 const START_TIMEOUT_MS = 8000;
 const CALL_TIMEOUT_MS = 40000;
 const workerUrl = new URL('./mcp-worker.mjs', import.meta.url);
 const originalArgs = process.argv.slice(2);
+function launcherFingerprint() {
+  try { return createHash('sha256').update(fs.readFileSync(new URL(import.meta.url))).digest('hex'); }
+  catch { return null; }
+}
+const loadedLauncherFingerprint = launcherFingerprint();
+function launcherHealth() {
+  const disk = launcherFingerprint();
+  const known = loadedLauncherFingerprint !== null && disk !== null;
+  return { state: known ? loadedLauncherFingerprint === disk ? 'current' : 'outdated' : 'unknown',
+    hostReconnectRequired: known ? loadedLauncherFingerprint !== disk : null, automaticChanges: false };
+}
+function statusWithLauncherHealth(result) {
+  if (result?.isError || !Array.isArray(result?.content)) return result;
+  return { ...result, content: result.content.map(item => {
+    if (item?.type !== 'text') return item;
+    try {
+      const data = JSON.parse(item.text);
+      if (!data || typeof data !== 'object' || Array.isArray(data)) return item;
+      return {...item,text:JSON.stringify({...data,mcpLauncherPid:process.pid,launcherHealth:launcherHealth()})};
+    } catch { return item; }
+  }) };
+}
 const value = name => { const i = originalArgs.indexOf(name); return i >= 0 ? originalArgs[i + 1] : undefined; };
 const portValue = Number(value('--port'));
 const PORT = Number.isInteger(portValue) && portValue > 0 && portValue < 65536 ? portValue : 17653;
@@ -33,7 +56,7 @@ const handlers = new Set();
 
 function failure(code, message, outcome = 'unverified') { return Object.assign(new Error(message), { code, outcome }); }
 function toolError(error) {
-  return { isError: true, content: [{ type: 'text', text: error.message }],
+  return { isError: true, content: [{ type: 'text', text: error.message + '\n诊断：' + JSON.stringify({ code: error.code || 'BROWSER_ACTION_FAILED', outcome: error.outcome || 'unverified' }) }],
     structuredContent: { error: { code: error.code || 'BROWSER_ACTION_FAILED', message: error.message, outcome: error.outcome || 'unverified' } } };
 }
 function write(message) { if (!shuttingDown) process.stdout.write(JSON.stringify(message) + '\n'); }
@@ -43,12 +66,12 @@ function diskVersion() {
   catch { return null; }
 }
 function info(entry = active) {
-  return entry?.info ?? { mcpVersion: lastInfo?.mcpVersion ?? diskVersion(), mcpPid: null, mcpGeneration: lastInfo?.mcpGeneration ?? 0 };
+  return entry?.info ?? { mcpVersion: lastInfo?.mcpVersion ?? null, mcpPid: null, mcpGeneration: lastInfo?.mcpGeneration ?? 0 };
 }
 function localStatus() {
   const current = info();
   const mcpDiskVersion = diskVersion();
-  const data = { ...current, mcpDiskVersion, mcpLauncherPid: process.pid,
+  const data = { ...current, mcpDiskVersion, mcpLauncherPid: process.pid, launcherHealth: launcherHealth(),
     mcpState: restarting ? 'restarting' : booting ? 'starting' : 'unavailable',
     restartRequired: !active || (mcpDiskVersion === null ? null : mcpDiskVersion !== current.mcpVersion),
     bridgeStatusAvailable: false, port: PORT, host: HOST,
@@ -167,14 +190,16 @@ async function activate(entry) {
   startupError = null;
 }
 function callWorker(entry, name, args) {
+  if (entry.stopping || entry.exited || !entry.child.connected) return Promise.reject(failure('MCP_WORKER_UNAVAILABLE', 'MCP 工作进程正在停止或已不可用；本次调用未派发。', 'not-dispatched'));
   return new Promise((resolve, reject) => {
     const id = ++nextCall;
     const timer = setTimeout(() => {
-      // 结果未知时保留 inFlight，直到 worker 确实停止；不能允许后续 restart 重放或中断隐藏的业务操作。
-      void stopWorker(entry).catch(() => {}).finally(() => {
-        entry.pending.delete(id);
-        reject(failure('MCP_WORKER_TIMEOUT', 'MCP 工作进程调用超时，已终止该工作进程；执行结果未知，不会自动重放。'));
-      });
+      // 截止后先移出结果路由，避免停止期间的迟到结果或 disconnect 抢先覆盖超时。
+      // inFlight 保留到有界停止结束；失败时也不能声称进程已终止。
+      entry.pending.delete(id);
+      void stopWorker(entry).then(() => {
+        reject(failure('MCP_WORKER_TIMEOUT', 'MCP 工作进程调用超时，已终止该工作进程；执行结果未知，不会自动重放。请先回读确认，保留诊断并交接维护。'));
+      }, error => reject(error));
     }, CALL_TIMEOUT_MS);
     entry.pending.set(id, { resolve, reject, timer });
     void send(entry, { type: 'call', id, name, args }).catch(error => {
@@ -204,7 +229,7 @@ async function restart(args) {
     if (inputClosed) throw failure('MCP_INPUT_CLOSED', '宿主输入已关闭，取消尚未切换的MCP重载。');
     await activate(candidate);
     await stopWorker(old);
-    const result = { restart: true, scope: 'mcp-worker', mcpLauncherPid: process.pid, before, after: info(candidate) };
+    const result = { restart: true, scope: 'mcp-worker', mcpLauncherPid: process.pid, before, after: info(candidate), launcherHealth: launcherHealth() };
     listChanged();
     return { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result };
   } catch (error) {
@@ -237,7 +262,8 @@ async function handle(message) {
         if (name === 'browser_status') return reply(localStatus());
         throw failure('MCP_WORKER_UNAVAILABLE', 'MCP 工作进程不可用，请调用 browser_restart({}) 恢复；本次调用未派发。');
       }
-      return reply(await callWorker(active, name, message.params?.arguments ?? {}));
+      const result = await callWorker(active, name, message.params?.arguments ?? {});
+      return reply(name === 'browser_status' ? statusWithLauncherHealth(result) : result);
     } catch (error) { return reply(toolError(error)); }
     finally { inFlight--; }
   }

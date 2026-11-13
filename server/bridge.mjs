@@ -88,6 +88,26 @@ async function readJson(req, limit = 12 * 1024 * 1024) {
 
 export { validateCommand } from './protocol.mjs';
 
+const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+const resultError = value => record(value) && typeof value.message === 'string' && value.message.trim().length > 0;
+// 只验证传输约定；不把页面内容或业务含义误当作成功证明。
+function validCommandResult(method, value, commands) {
+  if (method === 'list_tabs') return Array.isArray(value) && value.every(tab => record(tab) && Number.isSafeInteger(tab.id) && tab.id >= 0);
+  if (!record(value)) return false;
+  if (method === 'screenshot') return typeof value.data === 'string' && value.data.length > 0 && value.mimeType === 'image/png';
+  if (method !== 'batch') return true;
+  return Array.isArray(commands) && Array.isArray(value.results) && value.results.length === commands.length && value.results.every((item, index) =>
+    record(item) && typeof item.ok === 'boolean' && (item.ok
+      ? Object.hasOwn(item, 'result') && !Object.hasOwn(item, 'error') && validCommandResult(commands[index].method, item.result)
+      : !Object.hasOwn(item, 'result') && resultError(item.error)));
+}
+function validResultEnvelope(value, method, commands) {
+  return record(value) && Object.hasOwn(value, 'error') !== Object.hasOwn(value, 'result') &&
+    (Object.hasOwn(value, 'error') ? resultError(value.error) : validCommandResult(method, value.result, commands));
+}
+const safeErrorCode = (value, fallback) => typeof value === 'string' && /^[A-Z0-9_]{1,50}$/.test(value) ? value : fallback;
+const safeCommandId = value => typeof value === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(value) ? value : undefined;
+
 // 一键配对：扩展首次连接时把自身来源登记进白名单（TOFU，上限 8 个）。
 // 该边界只隔离网页来源；本机进程的信任范围与旧 token 方案相同（token 文件它们本来就读得到）。
 // 桥实例：host 默认只绑本机回环。跨机器访问时绑定网卡（--host 0.0.0.0 或局域网 IP），
@@ -202,7 +222,7 @@ export function createBridge({ port = DEFAULT_PORT, host = '127.0.0.1', configDi
         const stale = lastSeenAgeMs >= staleAfterMs;
         if (pending.size >= 20) return json(res, 429, { error: '待处理指令过多' });
         const id = crypto.randomUUID();
-        const item = { res, timer: null, stale, method, started: Date.now(), client: lastClient, recipient: null };
+        const item = { res, timer: null, stale, method, commands: method === 'batch' ? params.commands.map(({ method }) => ({ method })) : undefined, started: Date.now(), client: lastClient, recipient: null };
         log('command_queued', { id, method, tabId: params?.tabId, stale });
         pending.set(id, item);
         item.timer = setTimeout(() => {
@@ -269,17 +289,21 @@ export function createBridge({ port = DEFAULT_PORT, host = '127.0.0.1', configDi
       }
       if (req.url === '/result' && req.method === 'POST') {
         const data = await readJson(req);
+        if (!record(data) || !safeCommandId(data.id)) return json(res, 400, { error: '结果缺少有效的指令标识', code: 'INVALID_EXTENSION_RESULT' });
         const item = pending.get(data.id);
         if (!item) return json(res, 404, { error: '指令已过期或不存在' });
         const client = `chrome-extension://${clientId}`;
         if (item.recipient !== client) return json(res, 403, { error: '结果来源与指令接收扩展不匹配' });
         renewLease(client);
-        log('command_result', { id: data.id, method: item.method, outcome: data.error ? 'error' : 'ok', durationMs: Date.now() - item.started });
+        const valid = validResultEnvelope(data, item.method, item.commands);
+        log('command_result', { id: data.id, method: item.method, outcome: !valid || data.error ? 'error' : 'ok', durationMs: Date.now() - item.started });
         pending.delete(data.id);
         clearTimeout(item.timer);
-        if (data.error) {
+        if (!valid) {
+          json(item.res, 502, { error: '扩展返回了无效的结果结构；执行结果未知，不会自动重放。请先回读确认，保留指令标识并交接维护。', code: 'INVALID_EXTENSION_RESULT', outcome: 'unverified', commandId: data.id });
+        } else if (data.error) {
           const diagnostic = pageResultDiagnostic(data.error.diagnostic);
-          json(item.res, 502, { error: String(data.error.message ?? data.error), code: /^[A-Z_]{1,50}$/.test(data.error.code) ? data.error.code : 'BROWSER_ACTION_FAILED', outcome: data.error.outcome === 'not-dispatched' ? 'not-dispatched' : 'unverified',
+          json(item.res, 502, { error: data.error.message, code: safeErrorCode(data.error.code, 'BROWSER_ACTION_FAILED'), outcome: data.error.outcome === 'not-dispatched' ? 'not-dispatched' : 'unverified',
             ...(diagnostic && Object.keys(diagnostic).length ? { diagnostic } : {}), commandId: data.id });
         }
         else json(item.res, 200, { result: data.result });
@@ -311,15 +335,28 @@ export function createBridge({ port = DEFAULT_PORT, host = '127.0.0.1', configDi
 }
 
 export async function bridgeRequest(route, { port = DEFAULT_PORT, host = '127.0.0.1', token = '', body, timeout = Math.max(COMMAND_TIMEOUT_MS, RPC_WAIT_WHEN_STALE_MS) + RPC_RESPONSE_MARGIN_MS } = {}) {
-  const response = await fetch(`http://${host}:${port}${route}`, {
-    method: body === undefined ? 'GET' : 'POST',
-    headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(timeout)
-  });
-  const data = await response.json();
-  if (!response.ok) throw Object.assign(new Error(data.error ?? `本机桥 HTTP ${response.status}`), { code: data.code || `BRIDGE_HTTP_${response.status}`, outcome: data.outcome,
-    diagnostic: pageResultDiagnostic(data.diagnostic), commandId: typeof data.commandId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(data.commandId) ? data.commandId : undefined });
+  const signal = AbortSignal.timeout(timeout);
+  const invalidResponse = () => Object.assign(new Error('本机桥返回了无效的响应结构；执行结果未知，不会自动重放。请先回读确认，保留诊断并交接维护。'), { code: 'BRIDGE_INVALID_RESPONSE', outcome: 'unverified' });
+  let response, data;
+  try {
+    response = await fetch(`http://${host}:${port}${route}`, {
+      method: body === undefined ? 'GET' : 'POST',
+      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+      body: body === undefined ? undefined : JSON.stringify(body), signal
+    });
+    data = await response.json();
+  } catch (error) {
+    if (signal.aborted) throw Object.assign(new Error('等待本机桥响应超时；执行结果未知，不会自动重放。请先回读确认，保留诊断并交接维护。'), { code: 'BRIDGE_REQUEST_TIMEOUT', outcome: 'unverified' });
+    if (error instanceof SyntaxError) throw invalidResponse();
+    throw Object.assign(new Error('本机桥连接或响应传输中断；执行结果未知，不会自动重放。请检查桥与扩展状态，先回读确认并交接维护。'), { code: 'BRIDGE_TRANSPORT_ERROR', outcome: 'unverified' });
+  }
+  if (!record(data)) throw invalidResponse();
+  if (!response.ok) {
+    if (typeof data.error !== 'string' || !data.error.trim()) throw invalidResponse();
+    throw Object.assign(new Error(data.error), { code: safeErrorCode(data.code, `BRIDGE_HTTP_${response.status}`), outcome: data.outcome === 'not-dispatched' ? 'not-dispatched' : 'unverified',
+      diagnostic: pageResultDiagnostic(data.diagnostic), commandId: safeCommandId(data.commandId) });
+  }
+  if (route === '/rpc' && (!Object.hasOwn(data, 'result') || Object.hasOwn(data, 'error') || !validCommandResult(body?.method, data.result, body?.params?.commands))) throw invalidResponse();
   return data;
 }
 

@@ -54,6 +54,9 @@ if(mode==='duplicates')for(let n=0;n<2;n++){const button=document.createElement(
 if(mode==='long')for(let n=0;n<1600;n++){const button=document.createElement('button');button.textContent='Earlier '+n;document.body.insertBefore(button,popup)}
 if(mode==='pagination'){const main=document.createElement('main');for(let n=0;n<155;n++){const item=document.createElement('div');item.style.cursor='pointer';item.textContent='Choice '+n;main.append(item)}document.body.append(main);const out=document.createElement('div');out.textContent='Choice outside';out.style.cursor='pointer';document.body.append(out)}
 if(mode==='inline'){const item=document.createElement('div');item.textContent='点击项';item.setAttribute('onclick',"document.getElementById('status').textContent='inline selected'");document.body.append(item)}
+if(mode.startsWith('form-shadow-')){const form=document.createElement('form');form.id='shadow-form';form.setAttribute('onclick','void 0');form.setAttribute('role','grid');form.setAttribute('aria-label','Native named form');const field=document.createElement('input');field.name=mode.slice('form-shadow-'.length);field.type='password';field.value='PRIVATE-NATIVE-FORM';field.setAttribute('aria-label','Named probe');form.append(field);const button=document.createElement('button');button.textContent='Continue';form.append(button);document.body.append(form)}
+if(mode==='drag-identity'){window.nativeDrops=0;const from=document.createElement('div');from.id='drag-source';from.draggable=true;from.textContent='Drag source';from.style.cssText='padding:20px;border:1px solid #333';const to=document.createElement('div');to.id='drag-target';to.setAttribute('role','button');to.textContent='Drop target';to.style.cssText='padding:20px;border:1px solid #333;margin:20px';from.addEventListener('pointerdown',()=>{from.textContent='Changed source'});to.addEventListener('drop',()=>{nativeDrops++});document.body.append(from,to)}
+if(mode==='hover-transition'){const owner=document.createElement('button');owner.id='hover-owner';owner.textContent='Hover owner';owner.setAttribute('aria-haspopup','menu');owner.setAttribute('aria-expanded','true');owner.setAttribute('aria-controls','fixture-menu');const menu=document.createElement('div');menu.id='fixture-menu';menu.setAttribute('role','menu');menu.style.cssText='position:absolute;left:650px;top:120px;background:white;padding:10px';const item=document.createElement('button');item.textContent='Menu option';menu.append(item);document.body.append(owner,menu)}
 </script></html>'''
 
 
@@ -94,8 +97,13 @@ def main():
             report['browser'] = context.browser.version
             try:
                 for case in ['delegated', 'framework', 'default-cursor', 'hover-cursor', 'select', 'inline', 'duplicates', 'static', 'ordinary-td',
-                             'aria-disabled', 'inert', 'hidden', 'offscreen', 'long', 'pagination']:
+                             'aria-disabled', 'inert', 'hidden', 'offscreen', 'long', 'pagination',
+                             'form-shadow-getAttribute', 'form-shadow-hasAttribute', 'form-shadow-matches', 'form-shadow-querySelectorAll',
+                             'form-shadow-contains', 'form-shadow-closest', 'form-shadow-getClientRects',
+                             'form-shadow-action', 'form-shadow-method', 'form-shadow-target', 'drag-identity', 'hover-transition']:
                     page = context.new_page()
+                    page_errors=[]
+                    page.on('pageerror',lambda error: page_errors.append(str(error)))
                     record = {'name': case, 'status': 'running'}
                     report['checks'].append(record)
                     try:
@@ -151,6 +159,38 @@ def main():
                                 assert cell['tag'] == 'td' and cell['role'] == 'generic' and cell['candidateKind'] == 'native-cell' and not cell['inPopup'], cell
                             else:
                                 assert result['elements'] == [], result
+                        elif case.startswith('form-shadow-'):
+                            prop=case[len('form-shadow-'):]
+                            record['nativeNamedPropertyType']=js('typeof document.getElementById("shadow-form")['+json.dumps(prop)+']')
+                            assert record['nativeNamedPropertyType']=='object', record
+                            result=query(name='Named probe',exact=True)
+                            assert len(result['elements'])==1, result
+                            assert 'PRIVATE-NATIVE-FORM' not in json.dumps(result), result
+                            state=ok(call('inspect',result['elements'][0]['ref']))
+                            assert not state['identityChanged'], state
+                            record['snapshot']=result
+                            form_result=query(name='Native named form',exact=True)
+                            assert len(form_result['elements'])==1,form_result
+                            record['formInspect']=ok(call('inspect',form_result['elements'][0]['ref']))
+                            assert not record['formInspect']['identityChanged']
+                            assert 'PRIVATE-NATIVE-FORM' not in json.dumps(record)
+                        elif case == 'hover-transition':
+                            result=query(name='Hover owner',exact=True)
+                            assert len(result['elements'])==1,result
+                            js('globalThis.__qaNativeErrors=[];addEventListener("error",event=>__qaNativeErrors.push(event.message));')
+                            ok(call('holdHover',{'ref':result['elements'][0]['ref']}))
+                            js('document.getElementById("hover-owner").dispatchEvent(new Event("transitionend",{bubbles:true}));document.getElementById("fixture-menu").dispatchEvent(new Event("animationend",{bubbles:true}));')
+                            assert js('__qaNativeErrors')==[]
+                        elif case == 'drag-identity':
+                            all_targets=query(scope='viewport')
+                            source_ref=next(item['ref'] for item in all_targets['elements'] if item['name']=='Drag source')
+                            target_ref=next(item['ref'] for item in all_targets['elements'] if item['name']=='Drop target')
+                            from_point=ok(call('prepare',{'ref':source_ref,'action':'drag'}))
+                            to_point=ok(call('prepare',{'ref':target_ref,'action':'drag'}))
+                            blocked=call('domDrag',{'fromRef':source_ref,'toRef':target_ref,'from':from_point,'to':to_point,'durationMs':10})
+                            assert blocked.get('__zcodeCode')=='TARGET_CHANGED',blocked
+                            assert page.evaluate('nativeDrops')==0
+                            record['blocked']=blocked
                         elif case == 'pagination':
                             result = query(name='Choice ', scope='main')
                             assert result['pagination']['total'] == 155, result
@@ -197,6 +237,8 @@ def main():
                                 if case not in ['select', 'inline']:
                                     assert page.locator('#month-input').input_value() == '2026-10'
                                 record['events'] = page.evaluate('fixtureEvents')
+                        page.wait_for_timeout(20)
+                        assert not page_errors,page_errors
                         record['status'] = 'pass'
                     except Exception as error:
                         record['status'] = 'fail'

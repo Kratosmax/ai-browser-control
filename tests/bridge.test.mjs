@@ -159,7 +159,7 @@ test('扩展待机时 /rpc 等待唤醒（不立即拒绝），超时给出可�
     await new Promise(resolve => setTimeout(resolve, 30));
     const rpc2 = fetch(base+'/rpc', { method: 'POST', headers: { ...heads, 'Content-Type': 'application/json' }, body: JSON.stringify({ method: 'list_tabs' }) });
     const command = await (await poll2).json();
-    await fetch(base+'/result', { method: 'POST', headers: heads, body: JSON.stringify({ id: command.id, result: { tabs: [] } }) });
+    await fetch(base+'/result', { method: 'POST', headers: heads, body: JSON.stringify({ id: command.id, result: [] }) });
     assert.equal((await rpc2).status, 200);
   } finally { await bridge.close(); await fs.rm(dir, { recursive: true, force: true }); }
 });
@@ -309,8 +309,8 @@ test('默认bridgeRequest在15秒后仍等待待机扩展恢复，且不重放�
   await waitFor(s => s.pending === 1);
   await new Promise(resolve => setTimeout(resolve, 16000));
   const command = await (await get('/poll', EXT_A)).json();
-  await post('/result', EXT_A, { id: command.id, result: { tabs: [] } });
-  assert.deepEqual(await result, { result: { tabs: [] } });
+  await post('/result', EXT_A, { id: command.id, result: [] });
+  assert.deepEqual(await result, { result: [] });
   assert.ok(Date.now() - started >= 16000);
   assert.equal((await get('/poll', EXT_A)).status, 204, '已完成命令不会重新派发');
 });
