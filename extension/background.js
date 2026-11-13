@@ -465,7 +465,7 @@ async function pageAgent(tabId, operation, ref, check = () => {}) {
           if (!methods.includes(name)) return errorEnvelope('PAGE_AGENT_INVALID_OPERATION', '不支持的页面操作', 'invoke');
           // Chrome回调可能在期限后才开始；进入页面方法前拒绝，不能让迟到回调执行写入。
           if (Number.isFinite(deadline) && Date.now() >= deadline) return errorEnvelope('PAGE_AGENT_COMMAND_EXPIRED', '页面操作已过期，未调用页面方法', 'invoke');
-          const agent = globalThis.__aiBrowserPageAgent8;
+          const agent = globalThis.__aiBrowserPageAgent9 || globalThis.__aiBrowserPageAgent8;
           agentPresent = !!agent;
           if (!agent) return errorEnvelope('PAGE_AGENT_NOT_READY', '页面代理未就绪', 'invoke');
           if (typeof agent[name] !== 'function') return errorEnvelope('PAGE_AGENT_METHOD_MISSING', '页面代理缺少所需方法', 'invoke');

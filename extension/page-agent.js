@@ -2,14 +2,16 @@
   'use strict';
 
   // 注入到隔离世界；重复注入保留当前引用，不接收网页脚本指令。
-  if (globalThis.__aiBrowserPageAgent8) return;
+  if (globalThis.__aiBrowserPageAgent9) return;
+  // 已注入的旧代理不可覆盖；新后台使用9，旧调用方仅在首次注入时获得兼容别名。
+  if (globalThis.__aiBrowserPageAgent8) void globalThis.__aiBrowserPageAgent8.hideCursor?.();
 
   let generation = Date.now();
   let refs = new Map();
   let refUrl = location.href;
   let snapshotCache = null;
   let snapshotRequest = 0;
-  const SELECTOR = 'input,textarea,select,button,a,main,dialog,[role],[tabindex],[contenteditable],[aria-haspopup],[draggable="true"],[ondrop]';
+  const SELECTOR = 'input,textarea,select,button,a,td,th,main,dialog,[role],[tabindex],[contenteditable],[aria-haspopup],[draggable="true"],[ondrop]';
   const TEXT_INPUTS = new Set(['text', 'search', 'email', 'url', 'tel', 'password', 'number']);
   const IMPLICIT_SUBMIT_INPUTS = new Set([...TEXT_INPUTS, 'date', 'month', 'week', 'time', 'datetime-local']);
 
@@ -24,13 +26,23 @@
   }
 
   function scanCache() {
-    return { descriptors: new WeakMap(), ancestors: new WeakMap(), visibility: new WeakMap() };
+    return { descriptors: new WeakMap(), ancestors: new WeakMap(), visibility: new WeakMap(), styleVisibility: new WeakMap() };
   }
 
   function scanVisible(element, cache) {
     if (!cache) return visible(element);
-    if (!cache.visibility.has(element)) cache.visibility.set(element, visible(element));
-    return cache.visibility.get(element);
+    if (cache.visibility.has(element)) return cache.visibility.get(element);
+    const path = []; let shown = element.isConnected && !element.closest('[hidden]');
+    if (shown) for (let node = element; node instanceof Element; node = node.parentElement) {
+      if (cache.styleVisibility.has(node)) { shown = cache.styleVisibility.get(node); break; }
+      path.push(node);
+      const style = getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || Number(style.opacity) === 0) { shown = false; break; }
+    }
+    for (const node of path) cache.styleVisibility.set(node, shown);
+    const result = Boolean(shown && Array.from(element.getClientRects()).some(rect => rect.width > 0 && rect.height > 0));
+    cache.visibility.set(element, result);
+    return result;
   }
 
   function inViewport(element) {
@@ -102,10 +114,60 @@
     return items;
   }
 
+  // 自绘控件可能只有原生点击处理器或CSS指针，没有role/ARIA弹层关联。
+  // 保留真实tag/role；这是候选证据，不代表已验证网站绑定了业务动作。
+  function customControlCandidates(primary, cache) {
+    const primarySet = new Set(primary), signals = new Map();
+    for (const element of document.querySelectorAll('td,th,li,div,span,label,[onclick]')) {
+      const handler = element.hasAttribute('onclick') || typeof element.onclick === 'function';
+      const pointer = getComputedStyle(element).cursor === 'pointer';
+      if ((!handler && !pointer) || !scanVisible(element, cache)) continue;
+      const text = String(element.innerText || '').replace(/\s+/g, ' ').trim();
+      const name = nameOf(element);
+      if ((!name && !handler) || text.length > 500) continue;
+      signals.set(element, { name, rank: independentAction(element) ? 4 : ['td', 'th', 'li', 'label'].includes(element.tagName.toLowerCase()) ? 2 : 1 });
+    }
+    const wrappers = new Set(), descendantActions = new Set();
+    for (const element of new Set([...primary, ...signals.keys()])) {
+      if (!scanVisible(element, cache)) continue;
+      const name = nameOf(element);
+      for (let parent = element.parentElement; parent && parent !== document.body; parent = parent.parentElement) {
+        const signal = signals.get(parent);
+        if (!signal) continue;
+        if (signal.name !== name) wrappers.add(parent);
+        if (primarySet.has(element) && independentAction(element)) descendantActions.add(parent);
+      }
+    }
+    const kept = new Set();
+    for (const [element, signal] of signals) {
+      // 既有语义控件维持原集合；不新增包含多项操作的外层布局。
+      if (primarySet.has(element)) continue;
+      if (independentAction(element)) { kept.add(element); continue; }
+      if (wrappers.has(element) || descendantActions.has(element)) continue;
+      let duplicate = false;
+      for (let parent = element.parentElement; parent && parent !== document.body; parent = parent.parentElement) {
+        if (primarySet.has(parent) && independentAction(parent)) { duplicate = true; break; }
+        const owner = signals.get(parent);
+        if (owner && !wrappers.has(parent) && !descendantActions.has(parent) && owner.name === signal.name && owner.rank >= signal.rank) {
+          duplicate = true; break;
+        }
+      }
+      if (!duplicate) kept.add(element);
+    }
+    // 当内层有更明确的独立处理器时，让它替代仅继承pointer的同名包装。
+    for (const element of [...kept]) {
+      for (let parent = element.parentElement; parent && parent !== document.body; parent = parent.parentElement) {
+        if (kept.has(parent) && !independentAction(parent) && signals.get(parent).name === signals.get(element).name && signals.get(parent).rank < signals.get(element).rank) kept.delete(parent);
+      }
+    }
+    return kept;
+  }
+
   function candidateSet(cache = scanCache()) {
     const roots = popupRoots(cache), rootSet = new Set(roots), popup = popupItems(roots, cache);
     const primary = [...document.querySelectorAll(SELECTOR)], primarySet = new Set(primary);
-    const candidates = [...new Set([...primary, ...popup])];
+    const custom = customControlCandidates(primary, cache);
+    const candidates = [...new Set([...primary, ...popup, ...custom])];
     // Merge only nested representations of one action, never same-name siblings.
     // Native controls and explicit independent handlers always remain separate targets.
     const nested = new Map();
@@ -133,7 +195,7 @@
       kept.sort((a, b) => typeof a.compareDocumentPosition === 'function' ?
         (a.compareDocumentPosition(b) & 2 ? 1 : a.compareDocumentPosition(b) & 4 ? -1 : 0) : 0);
     }
-    return { candidates: kept, popup, roots };
+    return { candidates: kept, popup, roots, custom };
   }
 
   function interactiveCandidates() {
@@ -199,6 +261,8 @@
       if (summary.text.length > context.length) context = summary.text;
       if (summary.row) break;
     }
+    const title = compact(element.getAttribute('title'));
+    if (title && !context.includes(title)) context = compact(context + ' ' + title, 1600);
     const descriptor = { name, role: roleOf(element), tag: element.tagName.toLowerCase(), context,
       href: element.getAttribute('href'), expanded: element.getAttribute('aria-expanded') };
     cache?.descriptors.set(element, descriptor);
@@ -222,7 +286,7 @@
   async function prepare(target) {
     const { ref, expectedContext, action, position } = typeof target === 'string' ? { ref: target } : target;
     const element = resolve(ref);
-    if (action && refs.get(ref).ambiguous && !expectedContext) throw Object.assign(new Error('同名按钮存在多个，请传 expectedContext 核对业务身份，不能只按序号操作'), { code: 'AMBIGUOUS_TARGET' });
+    if (action && refs.get(ref).ambiguous && !expectedContext) throw Object.assign(new Error('同名目标存在多个，请传 expectedContext 核对业务身份，不能只按序号操作'), { code: 'AMBIGUOUS_TARGET' });
     if (expectedContext && !describe(element).context.includes(expectedContext)) throw Object.assign(new Error('目标上下文与 expectedContext 不符，已阻止操作，请重新 snapshot'), { code: 'TARGET_CHANGED' });
     const before = element.getClientRects()[0];
     // 已在视口内的目标不滚动，避免每次动作把目标挪到同一屏幕坐标。
@@ -414,7 +478,7 @@
 
   function scanSnapshot(query) {
     const cache = scanCache(), collected = candidateSet(cache), regions = scopeRoots(query, cache);
-    const records = [], buttonCounts = new Map(), regionSet = new Set(regions), membership = new WeakMap();
+    const records = [], buttonCounts = new Map(), customCounts = new Map(), regionSet = new Set(regions), membership = new WeakMap();
     const limitedRegion = query.container || ['main', 'dialog'].includes(query.scope);
     const inRegion = element => {
       const path = []; let node = element;
@@ -427,16 +491,22 @@
       if (!scanVisible(element, cache)) continue;
       const descriptor = describe(element, cache);
       if (descriptor.role === 'button' && descriptor.name) buttonCounts.set(descriptor.name, (buttonCounts.get(descriptor.name) || 0) + 1);
+      const candidateKind = ['td', 'th'].includes(descriptor.tag) ? 'native-cell' : collected.custom.has(element) ? 'custom-control' : 'semantic';
+      if ((candidateKind !== 'semantic' || descriptor.role === 'generic') && descriptor.name) {
+        const key = descriptor.role + ':' + descriptor.name;
+        customCounts.set(key, (customCounts.get(key) || 0) + 1);
+      }
       if (limitedRegion && !inRegion(element)) continue;
       const viewport = inViewport(element);
       if (query.scope === 'viewport' && !viewport) continue;
       if (query.name !== undefined && !(query.exact ? descriptor.name === query.name : descriptor.name.includes(query.name))) continue;
       if (query.role !== undefined && descriptor.role !== query.role) continue;
       if (query.context !== undefined && !descriptor.context.includes(query.context)) continue;
-      records.push({ element, descriptor, identity: identity(descriptor), domIndex,
+      records.push({ element, descriptor: { ...descriptor, candidateKind }, identity: identity(descriptor), domIndex,
         inViewport: viewport, inPopup: collected.popup.has(element) });
     }
-    for (const record of records) record.ambiguous = record.descriptor.role === 'button' && (buttonCounts.get(record.descriptor.name) || 0) > 1;
+    for (const record of records) record.ambiguous = (record.descriptor.role === 'button' && (buttonCounts.get(record.descriptor.name) || 0) > 1) ||
+      ((record.descriptor.candidateKind !== 'semantic' || record.descriptor.role === 'generic') && (customCounts.get(record.descriptor.role + ':' + record.descriptor.name) || 0) > 1);
     return { records, regions, candidateCount: collected.candidates.length,
       popupCount: records.filter(record => record.inPopup).length, cache };
   }
@@ -562,6 +632,17 @@
     };
   }
 
+  function inspectStyle(element) {
+    const style = getComputedStyle(element);
+    return { display: style.display, visibility: style.visibility, opacity: style.opacity,
+      pointerEvents: style.pointerEvents, position: style.position, zIndex: style.zIndex, cursor: style.cursor, filter: style.filter };
+  }
+
+  function inspectNode(element) {
+    return { tag: element.tagName.toLowerCase(), role: roleOf(element), name: nameOf(element),
+      id: compact(element.getAttribute('id'), 160), className: compact(element.getAttribute('class'), 200), style: inspectStyle(element) };
+  }
+
   function inspect(ref) {
     syncHoverHold();
     const record = refs.get(ref);
@@ -569,11 +650,19 @@
     const element = record.element;
     if (!element.isConnected) return { removed: true, visible: false };
     const descriptor = describe(element), rect = element.getClientRects()[0];
-    const hit = rect && document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    const x = rect && (Math.max(0, rect.left) + Math.min(innerWidth, rect.right)) / 2;
+    const y = rect && (Math.max(0, rect.top) + Math.min(innerHeight, rect.bottom)) / 2;
+    const hitTestable = Boolean(rect && rect.width > 0 && rect.height > 0 && rect.right > 0 && rect.bottom > 0 && rect.left < innerWidth && rect.top < innerHeight);
+    const hit = hitTestable ? document.elementFromPoint(x, y) : null;
     const state = { ...descriptor, ...elementState(element), visible: visible(element),
       identityChanged: identity(descriptor) !== record.identity,
       obscured: Boolean(hit && hit !== element && !element.contains(hit)),
       inViewport: Boolean(rect && rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth) };
+    state.hitTest = { status: !hitTestable ? 'outside-viewport' : !hit ? 'no-hit' : 'tested', ...(hitTestable ? { x, y } : {}) };
+    state.style = inspectStyle(element);
+    state.hitTarget = hit ? inspectNode(hit) : null;
+    state.ancestors = [];
+    for (let node = element.parentElement; node && state.ancestors.length < 6; node = node.parentElement) state.ancestors.push(inspectNode(node));
     if (globalThis.__aiBrowserCursor2) state.cursor = globalThis.__aiBrowserCursor2.state();
     if (element instanceof HTMLInputElement) state.inputType = element.type;
     if (element.hasAttribute('aria-controls') || element.hasAttribute('aria-owns')) {
@@ -929,9 +1018,7 @@
     domPress: guarded('domPress', domPress)
   };
 
-  Object.defineProperty(globalThis, '__aiBrowserPageAgent8', {
-    value: Object.freeze(agent),
-    configurable: false,
-    writable: false
-  });
+  Object.freeze(agent);
+  Object.defineProperty(globalThis, '__aiBrowserPageAgent9', { value: agent, configurable: false, writable: false });
+  if (!globalThis.__aiBrowserPageAgent8) Object.defineProperty(globalThis, '__aiBrowserPageAgent8', { value: agent, configurable: false, writable: false });
 })();

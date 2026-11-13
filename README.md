@@ -2,7 +2,7 @@
 
 让支持 MCP 的 AI 助手按标签页读取和操作真实 Edge / Chrome。后台操作不切换标签页、不移动系统鼠标。
 
-当前版本：0.17.0。新增独立的“后台唤醒冻结页”开关，默认关闭；开启后，新的snapshot/inspect/wait读取遇到冻结页可临时使用CDP唤醒，核对原生状态并清理本次附加后继续DOM读取。不切页、不刷新、不启用CDP点击、不重放旧操作；旧命令未结束仍拒绝进入，丢弃页不自动恢复。本仓库提供源码，不另设此版本的 GitHub Release。
+当前版本：0.17.1。修复无role月历单元格及自绘点击项的定位遗漏，新增candidateKind区分原生单元格内容与控件候选，保留真实角色；同名目标继续核对上下文。inspect补充有界样式、祖先和命中证据，辅助区分加载、透明与遮挡。保持独立后台唤醒、不切页/不重放及原有权限边界；不以补丁宣称网站白色覆盖根因已解决。本仓库提供源码，不另设此版本的 GitHub Release。
 
 ## 开始使用
 
@@ -94,6 +94,12 @@ taskId和taskName为open必填参数；升级后客户端必须重连读取新�
 清理须同时满足三项：AI创建或连带创建；当前仍在目标任务分组；agent已评估操作结束，或页面数量超限。某些页面对应操作已结束、总任务还在继续时，用browser_task(action=close,tabIds=[...])只关闭指定管理页；整个任务结束才finish。cleanup用于超过12页时整理。满足三项时允许关闭活动、有声、固定或有未保存输入的页面，不再将这些状态当成禁止清理条件。显式keep的交付页继续保留，正在执行命令的页面本轮跳过。keep页可先unkeep再按页close。adopt需要taskName和pages，每项明确tabId、精确url、当前groupId和evidence:{kind,reference}；reference应指向真实AI创建/连带创建回执，无证据不得登记。回执closed仅列独立核验已消失的页，closedCount=0必须说明实际关闭0页，不能称清理完成；浏览器自身的关闭限制不绕过。任务名称与结束信号仍由agent传入，插件不按空闲时间猜测任务结束。
 
 browser_batch一次最多4个不同tabId，支持快照、截图及交互，返回逐项结果；同页依赖步骤继续顺序执行，批次不是事务，失败不重放业务操作。每项独立保留成功/超时/忙碌结果，超时含commandId及安全phase/lifecycle诊断；list_tabs中的operation保留未结束命令及timedOut状态，桥pending=0不代表该页空闲。注入文件和页面调用使用injectImmediately读取已存在DOM，不等待document_idle，不激活页面或绕过冻结/权限。遇到DOM歧义、遮挡或状态冲突时，技能要求先截图/inspect复查，再判断是否确实需要用户处理。详见[任务、并行与验收](skills/ai-browser-control/references/tasks-and-verification.md)。
+
+### 自绘控件与原生单元格
+
+0.17.1返回candidateKind：semantic为原有语义候选，custom-control为有点击处理器或指针样式证据的自绘项，native-cell为原生td/th内容。角色仍按DOM实际属性返回，没有role的月份单元格为generic，不伪造成button或option。普通静态表格单元格也可读取并定位，但不是已证实的按钮；操作依赖用户意图、上下文与回读。普通无标记静态正文不会因此全部获得ref。未暴露语义/处理器/样式的委托事件div仍可能无法识别，不保证所有框架控件。
+
+重复名称的generic/单元格必须传expectedContext；月份title中的年份会补入context。选择同一动作的嵌套表示时收敛被动包装，独立onclick及原生/ARIA动作仍保留。同轮分页保持ref稳定，相关候选变化拒绝续页；150仍只限制每批返回量。inspect增加固定样式、最多6层祖先、采样命中节点与hitTest.status，不读HTML/框架内部对象，不修改样式/遮罩。Agent9可与不可覆盖的旧Agent8并存，新后台优先9，升级后重新snapshot。
 
 ### 冻结页面
 
@@ -218,7 +224,7 @@ node test-page/serve.mjs
 自动化回归：
 
 ```powershell
-node --test tests/bridge.test.mjs tests/install.test.mjs tests/diagnostics.test.mjs tests/protocol.test.mjs tests/supervisor.test.mjs extension/tests/mock.test.cjs extension/tests/expired-result.test.cjs extension/tests/tasks.test.cjs extension/tests/page-interactions.test.cjs extension/tests/task-recovery.test.cjs extension/tests/snapshot-query.test.cjs extension/tests/page-rpc.test.cjs extension/tests/batch-timeout.test.cjs extension/tests/lifecycle-wake.test.cjs tests/mcp-restart.test.mjs tests/snapshot-format.test.mjs
+node --test tests/bridge.test.mjs tests/install.test.mjs tests/diagnostics.test.mjs tests/protocol.test.mjs tests/supervisor.test.mjs extension/tests/mock.test.cjs extension/tests/expired-result.test.cjs extension/tests/tasks.test.cjs extension/tests/page-interactions.test.cjs extension/tests/task-recovery.test.cjs extension/tests/snapshot-query.test.cjs extension/tests/page-rpc.test.cjs extension/tests/batch-timeout.test.cjs extension/tests/lifecycle-wake.test.cjs extension/tests/custom-controls.test.cjs tests/mcp-restart.test.mjs tests/snapshot-format.test.mjs
 python -X utf8 tests/browser-ui.py
 python -X utf8 tests/browser-extension.py
 python -X utf8 tests/browser-loading.py
@@ -226,6 +232,7 @@ python -X utf8 tests/browser-lifecycle.py
 python -X utf8 tests/browser-timeout.py
 python -B tests/browser-frozen.py
 python -B tests/browser-lifecycle-wake.py
+python -B tests/browser-custom-controls.py --source current --label local-check
 ```
 
 Python 项仅供开发验收，依赖测试机已有 Python Playwright、Pillow 和 Edge；browser-frozen.py和browser-lifecycle-wake.py另需已有websocket-client以便只连接私有测试浏览器、不自动附加页面。不属于运行时依赖，不自动安装或复制全局工具。UI 对照测试还需要 Git 历史中的基线提交（见 REQUIREMENTS.md）；纯 ZIP 没有该历史时无法生成旧版对照。它们使用独立临时浏览器配置和测试桥，不控制用户的标签页。证据输出到 `temp/qa/`。无 CDP 截图正向夹具的额外权限与正式清单不同，具体限制在测试记录中明确列出。

@@ -14,7 +14,9 @@
 
 分裂按钮优先定位独立箭头ref。箭头未单独暴露时依据截图/inspect位置使用click.position={x:0..1,y:0..1}，相对整个元素边框；不能假定所有按钮的0.95处都有箭头。插件校验ref身份和遮挡，但不会替agent理解子区域的业务含义。
 
-0.10.1识别tabindex及明确关联弹层中的li、自绘指针项，标记inPopup，优先保留菜单候选项；inspect触发器的popups可核对关联弹层是否可见及候选项数。部分菜单项没有role=menuitem，应依据实际快照用精确name等待，不凭外观猜role。文字出现但仍无ref时报告定位缺口，不能把展开菜单当作整个业务流程已可执行。
+0.10.1识别tabindex及明确关联弹层中的li、自绘指针项，标记inPopup，优先保留菜单候选项；inspect触发器的popups可核对关联弹层是否可见及候选项数。部分菜单项没有role=menuitem，应依据实际快照用精确name等待，不凭外观猜role。文字出现但仍无ref时，先用精确name且不猜role做load=current定位；异步/动画用一次有界wait(name=...,state=visible)后重新snapshot，不能只凭正文有字或刚展开就确认可操作。仍无ref才报告定位缺口，不能把展开菜单当作整个业务流程已可执行。
+
+0.17.1补充原生td/th内容引用，以及有onclick处理器/属性或指针样式证据的自绘div/span/li等候选。candidateKind区分native-cell、custom-control、semantic，保留真实tag/role；native-cell不等于按钮、inPopup=false不代表不能选择。普通数据表格单元格也可能有内容ref，点击仍须有用户意图、目标上下文和独立验收。名称重复的generic/单元格需expectedContext；月份优先用context中的2026-10等标题核对年份，不能只按“10月”的第一个结果。
 
 长按不额外补发click；CDP由浏览器处理按下/释放，浏览器本身仍可能生成click。不能承诺长按没有业务副作用，需先确认目标和用户授权。
 
@@ -28,6 +30,12 @@
 - inspect可读不可见/禁用节点和identityChanged；出现身份变化时重新snapshot，不操作旧ref。快照每批最多150个ref，可用目标查询和cursor分页；编号变化按对应错误流程处理。
 - wait可用ref或text或精确name+role，ref不与其他条件混用。ref等待不刷新快照；等待隐藏时移除或不可见可匹配，节点复用成另一身份则报错。wait不自动滚动；name可能重复，返回count不是唯一性证明。
 - 拖拽必须核对fromRef/toRef各自业务身份，两个目标同时在同一主文档视口。DOM支持合成指针与HTML5 DataTransfer；CDP为真实指针拖动，不保证任意HTML5组件。动作结束会释放按键；结果未知先回读，不自动重放。
+
+## 加载、白色覆盖与透明区域
+
+只读检查必须对应当前tabId、URL和时刻。正文有筛选文字而无ref，可能是加载、透明/隐藏祖先或候选识别缺口；截图白色/发白只证明当时外观，不能直接断言插件遮罩、网站权限或永久不可用。工具正常时先对已知控件用一次有界wait/inspect后重新snapshot并核对截图，不能移除遮罩、修改CSS/pointerEvents或反复重建页面。普通未匹配与插件不可用按故障规则区分。
+
+inspect追加style、最多6层ancestors、hitTarget和hitTest.status，辅助检查opacity/filter/visibility/pointerEvents与采样命中；这些是当前只读证据，不改变页面。hitTest不是tested或hit为null时，obscured=false不能单独证明可点；容器中心命中自己的某个子节点也不能证明每个筛选控件都未遮挡。检查具体控件并保留最新快照引用。页面恢复后更新结论，不沿用旧截图继续要求用户接管；别把另一个临时页的正常状态当成原业务页恢复。
 
 ## DOM/CDP边界
 

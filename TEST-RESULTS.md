@@ -1,5 +1,15 @@
 # 验证记录
 
+## 2026-11-13：0.17.1月历/自绘候选识别与覆盖检查
+
+- 实际0.17.0现场：阿里云月历正文有10月、精确name无ref；输入无弹层关联，年份按钮可读。新的独立维护页经修复代码注入，精确name=10月返回唯一td/generic、candidateKind=native-cell，context含2026-10；inspect实际可见、未禁用未遮挡，祖先为next-calendar2-table-month，表格及单元格无role。维护只展开月历，不切换账期、导出或上锁。原用户保留页在调查期间被外部关闭，没有把No tab with id当成超时或归因插件。
+- 加入td/th原生内容ref与onclick属性/处理器或pointer证据的自绘div/span/li等候选，candidateKind保留语义区别，不推断button/option或popup；普通表格单元格也可读取，静态正文仍不全部纳入。嵌套被动包装收敛，独立处理器和原生/ARIA动作保留；generic/单元格同名跨候选类别强制expectedContext，title补入上下文核对年月。全量过滤/稳定分页与disabled/inert/身份/遮挡守卫保留。
+- 原生单元格的设计决策改变了独立QA最初“静态td必须无ref”假设：没有跳过该失败，明确将其改成native-cell内容ref、generic且非popup的验证，并保留静态非单元格正文无候选的负例，新增默认cursor与hover-only原生月份机制。中期失败结果保留在temp，独立设计与最终审查均接受此内容引用边界。没有以公共Fusion旧版含role代码冒充实际DOM。
+- 独立审查复现嵌套独立onclick被折叠、semantic generic与custom同名未触发上下文两处缺口，均已修复并补回归；另将无信号深层静态布局computed-style次数从100/200/400节点5250/20500/81000降至100/200/400。Agent9与不可覆盖旧8并存，新后台优先9兼容8回退，旧ref跨代拒绝；同代重复注入保留ref。
+- inspect补固定style、最多6层ancestors、hitTarget与hitTest.status，只读不改CSS/遮罩。OP首次同页发白、main仅1项，后来同页15项正常；用户补充后核对实际业务页4672也15项、截图正常，随后业务页原生读到服务商阿里云/月2026-10、图表204102.38，维护未选择该筛选。覆盖具体触发原因仍未查实，当前可读不等于永不复发。
+- 最终完整Node **320/320通过**，含16项custom与原全部回归。最终隔离真实Edge机制 **15/15通过**，含委托/逐单元格真实监听、默认/hover-only指针、Oct输入独立回读、嵌套/同名/禁用/隐藏/屏外/1600项/分页；独立基线固定f3ab65b原本8项单元和10项浏览器失败。现场新月份引用与OP当前可读另存live-evidence.json，最终独立复核 **82/82通过** 并重放原始反例，确认两项安全缺口和重复样式读取问题关闭，无新增阻断；只读inspect元数据、跨代升级和变动不污染identity另有独立断言。全部业务写入及锁定边界保持。
+
+
 ## 2026-11-12：0.17.0独立后台唤醒冻结页
 
 - 用户明确授权新增独立用途。弹窗新增“后台唤醒冻结页”，lifecycleWakeEnabled默认false、独立持久化和撤销代次；不由截图/输入开关、网页内容或普通MCP参数开启。新snapshot/inspect/wait且frozen=true、无旧挂起调用、未进入过页面方法时，每命令最多一次；仅发送Page.setWebLifecycleState(state=active)，有界确认原生状态后解除本次新建附加，继续DOM读取。既有输入附加只借用不解除，旧busy锁优先，晚回执不重放；写入、滚动、导航、丢弃页与后台空闲告警不主动唤醒。
