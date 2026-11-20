@@ -123,11 +123,15 @@ export function createBridge({ port = DEFAULT_PORT, host = '127.0.0.1', configDi
   let allowedOrigins = loadAllowlist(configDir);
   const isAllowed = origin => typeof origin === 'string' && allowedOrigins.includes(origin);
   const log = createLogger(configDir);
-  const renewLease = client => {
+  const renewLease = (client, browserModeProtocol = lease?.client === client && lease.browserModeProtocol) => {
     lastSeen = Date.now();
     lastClient = client;
-    lease = { client, expiresAt: lastSeen + leaseMs };
+    lease = { client, browserModeProtocol, expiresAt: lastSeen + leaseMs };
   };
+  const requireModeAwareExtension = res => json(res, 409, {
+    error: '浏览器扩展尚未加载普通/无痕模式校验。请更新并重载已配对的扩展。',
+    code: 'BROWSER_MODE_EXTENSION_UPDATE_REQUIRED', outcome: 'not-dispatched'
+  });
   // 长轮询结束不释放所有权；执行中的命令即使超过心跳期限也固定原扩展。
   const leaseHeld = () => lease && (Date.now() < lease.expiresAt || poll ||
     [...pending.values()].some(item => item.recipient === lease.client));
@@ -145,6 +149,17 @@ export function createBridge({ port = DEFAULT_PORT, host = '127.0.0.1', configDi
     const item = pending.get(queue[0].id);
     if (item.client !== poll.client) return;
     const current = poll;
+    // 同一扩展ID也可能在等待期间重载成旧版。以实际领取命令的轮询为准。
+    if (!current.browserModeProtocol) {
+      for (const [id, queued] of pending) {
+        if (queued.client !== current.client || queued.recipient) continue;
+        pending.delete(id);
+        clearTimeout(queued.timer);
+        requireModeAwareExtension(queued.res);
+      }
+      while (queue.length && !pending.has(queue[0].id)) queue.shift();
+      return;
+    }
     poll = null;
     clearTimeout(current.timer);
     const command = queue.shift();
@@ -172,7 +187,7 @@ export function createBridge({ port = DEFAULT_PORT, host = '127.0.0.1', configDi
       }
       if (req.method === 'OPTIONS') {
         if (!isAllowed(origin)) return json(res, 403, { error: '来源未配对' });
-        res.writeHead(204, { 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type, X-Client-Id' });
+        res.writeHead(204, { 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type, X-Client-Id, X-Browser-Mode-Protocol' });
         return res.end();
       }
       const clientId = req.headers['x-client-id'];
@@ -207,6 +222,7 @@ export function createBridge({ port = DEFAULT_PORT, host = '127.0.0.1', configDi
           version: VERSION,
           bridgeMethods: METHODS,
           extensionVersion: extensionVersions.get(lastClient) ?? null,
+          browserModeProtocol: lease?.browserModeProtocol ? 1 : null,
           diagnostics: { fileMaxBytes: LOG_MAX_BYTES, fileCount: LOG_BACKUPS + 1 }
         });
       }
@@ -219,6 +235,7 @@ export function createBridge({ port = DEFAULT_PORT, host = '127.0.0.1', configDi
         // 从未连接：立即报错并给出指引。曾连接但现在待机（浏览器后台挂起）：
         // 挂住请求等待扩展醒来执行，而不是直接拒绝——待机窗口最长可到约 1 分钟。
         if (lastSeen === 0) return json(res, 503, { error: '浏览器扩展尚未连接。在本机上打开浏览器里的 AI Browser Control 扩展弹窗即可自动连接；本机桥未启动时会由 AI 工具调用自动拉起。' });
+        if (!lease?.browserModeProtocol) return requireModeAwareExtension(res);
         const stale = lastSeenAgeMs >= staleAfterMs;
         if (pending.size >= 20) return json(res, 429, { error: '待处理指令过多' });
         const id = crypto.randomUUID();
@@ -279,8 +296,9 @@ export function createBridge({ port = DEFAULT_PORT, host = '127.0.0.1', configDi
         const client = `chrome-extension://${clientId}`;
         if (poll || (lease && lease.client !== client && leaseHeld())) return json(res, 409, { error: '已有活跃扩展占用命令通道；请先断开原扩展，或等待其连接租约到期' });
         if (lease && lease.client !== client) cancelClientCommands(lease.client);
-        renewLease(client);
-        const current = { res, timer: null, client };
+        const browserModeProtocol = req.headers['x-browser-mode-protocol'] === '1';
+        renewLease(client, browserModeProtocol);
+        const current = { res, timer: null, client, browserModeProtocol };
         poll = current;
         current.timer = setTimeout(() => { if (poll === current) poll = null; res.writeHead(204); res.end(); }, pollTimeout);
         res.on('close', () => { clearTimeout(current.timer); if (poll === current) poll = null; });

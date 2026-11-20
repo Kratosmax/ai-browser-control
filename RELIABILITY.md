@@ -47,7 +47,7 @@ node scripts/check-reliability.mjs --all --dry-run # 计划 + native 前置探�
 
 ## 3. native 固定允许清单与隔离审计
 
-`--native` 只执行以下四个脚本（固定参数，写死在 `NATIVE_ALLOWLIST`）。审计结论来自通读各脚本的隔离护栏：
+`--native` 只执行以下五个脚本（固定参数，写死在 `NATIVE_ALLOWLIST`）。审计结论来自通读各脚本的隔离护栏：
 
 | 脚本 | 固定参数 | 隔离护栏（脚本内证据） | 依赖 |
 | --- | --- | --- | --- |
@@ -55,8 +55,9 @@ node scripts/check-reliability.mjs --all --dry-run # 计划 + native 前置探�
 | `tests/browser-lifecycle-wake.py` | 无（默认 headless） | 同上模式（`temp/qa/wake-20261112-1904`；`LIFECYCLE_TEST_EDGE` 覆盖）；仅复用 frozen 的传输/进程助手 | python3、websocket-client、Node、Edge |
 | `tests/browser-custom-controls.py` | `--source current --label reliability` | 仅本机机制夹具 + 127.0.0.1 随机端口 HTTP；Playwright `channel='msedge'` headless 持久 profile 在 `temp/qa/calendar-20261113/qa-reliability-edge-profile`（结束时自删）；不涉及桥/MCP/用户 profile；`--source current` 直接读工作树，不依赖 git 历史 | python3、playwright、Edge |
 | `tests/browser-wait-lifecycle.py` | 无（**不带 `--baseline`**，即"当前源码模式"，前缀 `qa-updated-`） | 私有桥随机端口避开 17653；`TEMP/TMP/HOME/USERPROFILE/APPDATA/LOCALAPPDATA` 全重定向；扩展源码先复制进运行目录并以 bootstrap 存储屏障避免对默认桥的初始请求（`temp/qa/wait-20261113-1740`） | python3、websocket-client、Edge（`FROZEN_TEST_EDGE` 覆盖） |
+| `tests/browser-modes.py` | 无 | 通过临时 Edge profile、随机本机桥和测试页，验证实际普通及无痕窗口。扩展无痕权限仅在该测试 profile 内开启 | python3、websocket-client、Node、Edge |
 
-四个脚本都以 `raise SystemExit(main())` 结束，0/1 退出码可被运行器直接透传。其余 Python 项（browser-ui / browser-extension / browser-loading / browser-lifecycle / browser-timeout）**不在允许清单**：它们各有额外基线/下载/对照需求，继续按 README 由 Lead 手工执行。
+五个脚本都以 `raise SystemExit(main())` 结束，0/1 退出码可被运行器直接透传。其余 Python 项（browser-ui / browser-extension / browser-loading / browser-lifecycle / browser-timeout）**不在允许清单**：它们各有额外基线/下载/对照需求，继续按 README 由 Lead 手工执行。
 
 前置探测（只探测、不安装）：python3（win32 先 `python` 后 `py -3`，其余先 `python3`）、`websocket-client`、`playwright`（`importlib.util.find_spec`）、Edge（env 覆盖优先，其次常见安装路径）。任一缺失 → 退出 3 并逐项打印 `[MISSING]` 明细。`Pillow` 只有 browser-ui.py 需要，不在本清单前置内。
 
@@ -71,7 +72,7 @@ node scripts/check-reliability.mjs --all --dry-run # 计划 + native 前置探�
 | 身份与引用（ref 过期/快照漂移/分页/同名/自绘控件） | `extension/tests/expired-result.test.cjs`、`snapshot-query.test.cjs`、`page-rpc.test.cjs`、`reliability-page.test.cjs`、`custom-controls.test.cjs` | `browser-custom-controls.py`（真实 Edge 中 candidateKind/expectedContext/禁用阻断/分页唯一 ref） | 已加载 DOM ≠ 业务全量；旧轮游标/漂移返回 SNAPSHOT_CHANGED/STALE_CURSOR 后须重读，不重放动作 | unit 全绿 + custom-controls exit 0 |
 | 批次与迟到结果（部分成功/迟到回传/重传） | `extension/tests/batch-timeout.test.cjs`（部分结果保留+超时诊断）、`expired-result.test.cjs`（迟到响应不覆盖新连接）、`task-recovery.test.cjs`、`tests/reliability-server.test.mjs`（畸形回传信封/桥侧拒收）、`tests/recovery-policy.test.mjs` + `recovery-integration.test.mjs`（恢复指引） | （桥/扩展层已由私有桥 native 项间接行使） | 批次非事务；单页失败不重放；桥 pending=0 ≠ 页空闲 | unit 全绿 |
 | 命令超时/结果不确定 | `tests/bridge.test.mjs`、`browser-timeout` 系列（VM 侧对应单测） | （`browser-timeout.py` 不在允许清单，归 Lead 手工） | 11 秒命令期限后结果"不确定"：先回读，不重放、不清锁（README 连接异常排查节） | unit 全绿 |
-| MCP/worker/桥恢复与版本对齐 | `tests/supervisor.test.mjs`、`mcp-restart.test.mjs`、`diagnostics.test.mjs`、`recovery-policy*.mjs`、`install.test.mjs` | （冻结、唤醒、等待三项真实使用私有桥与stdioMCP；自绘控件项直接调用隔离世界原代理，不覆盖MCP） | 重载/监督只恢复传输，绝不重放命令；版本对齐不证明页面空闲（recovery-policy 注释） | unit 全绿 |
+| MCP/worker/桥恢复与版本对齐 | `tests/supervisor.test.mjs`、`mcp-restart.test.mjs`、`diagnostics.test.mjs`、`recovery-policy*.mjs`、`install.test.mjs` | （冻结、唤醒、等待和浏览器模式均通过私有桥与 stdio MCP 验证。自绘控件项直接调用隔离世界的页面代理） | 重载/监督只恢复传输，绝不重放命令；版本对齐不证明页面空闲（recovery-policy 注释） | unit 全绿 |
 | 运行器自身 | `tests/reliability-runner.test.mjs`（22 项：参数/发现/前置/超时/失败透传/退出码/CLI 冒烟） | — | 见 §6 限制 | runner 测试属于 unit，随套件全绿 |
 
 ## 5. 故障类别与安全处置

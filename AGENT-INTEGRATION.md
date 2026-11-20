@@ -27,6 +27,8 @@
 
 0.16.0仍21个工具，扩展snapshot参数name/role/exact/context、scope或scopeRef、cursor/limit；150仅每批返回数。pagination同轮refs稳定，相关候选变化报SNAPSHOT_CHANGED，新快照使旧cursor失效。compact格式保留，MCP仅移除format再透传其他查询参数。扩展page-agent代际8；部署后须重载扩展以生效，MCP重载仅刷新其定义。
 
+0.17.4 的浏览器工具默认使用普通模式。无痕请求使用 `browserMode: "incognito"` 并在每次续页、操作及批次子项和任务管理请求中传递。重新加载工作进程及工具目录、桥和扩展后，检查 `browser_status` 报告的版本及 `browserModeProtocol: 1`。
+
 ## 2. 启动契约
 
 本地 MCP 服务：

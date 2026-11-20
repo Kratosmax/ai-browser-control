@@ -48,7 +48,7 @@ export const LIMITS = Object.freeze({
   killGraceMs: 8_000,
 });
 
-// 固定原生允许清单：仅这四个已经审计过隔离护栏的脚本（见 RELIABILITY.md）。
+// 固定原生允许清单：仅这些已经审计过隔离护栏的脚本（见 RELIABILITY.md）。
 // browser-wait-lifecycle.py 不带 --baseline，即“当前源码模式”；
 // browser-custom-controls.py 固定 --source current --label reliability（不依赖 git 历史）。
 export const NATIVE_ALLOWLIST = Object.freeze([
@@ -56,6 +56,7 @@ export const NATIVE_ALLOWLIST = Object.freeze([
   Object.freeze({ id: 'browser-lifecycle-wake', file: 'tests/browser-lifecycle-wake.py', fixedArgs: Object.freeze([]), modules: Object.freeze(['websocket']) }),
   Object.freeze({ id: 'browser-custom-controls', file: 'tests/browser-custom-controls.py', fixedArgs: Object.freeze(['--source', 'current', '--label', 'reliability']), modules: Object.freeze(['playwright']) }),
   Object.freeze({ id: 'browser-wait-lifecycle', file: 'tests/browser-wait-lifecycle.py', fixedArgs: Object.freeze([]), modules: Object.freeze(['websocket']) }),
+  Object.freeze({ id: 'browser-modes', file: 'tests/browser-modes.py', fixedArgs: Object.freeze([]), modules: Object.freeze(['websocket']) }),
 ]);
 
 export class UsageError extends Error {}

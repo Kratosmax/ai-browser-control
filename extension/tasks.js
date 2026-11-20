@@ -25,17 +25,44 @@ globalThis.AiBrowserTasks = class {
     this.queues.set(taskId, next);
     try { return await next; } finally { if (this.queues.get(taskId) === next) this.queues.delete(taskId); }
   }
-  async live(taskId) {
+  mode(params = {}) {
+    const mode = params.browserMode === undefined ? 'regular' : params.browserMode;
+    if (!['regular', 'incognito'].includes(mode)) throw Object.assign(new Error('browserMode必须为regular或incognito'), { code: 'INVALID_ARGUMENTS', outcome: 'not-dispatched' });
+    return mode;
+  }
+  modeOf(tab) { return tab.incognito === true ? 'incognito' : 'regular'; }
+  modeInfo(tab) { return { incognito: tab.incognito === true, browserMode: this.modeOf(tab) }; }
+  assertMode(tab, mode) {
+    if (this.modeOf(tab) !== mode) throw Object.assign(new Error('目标与请求的浏览器模式不一致'), { code: 'BROWSER_MODE_MISMATCH', outcome: 'not-dispatched' });
+  }
+  async selectedModeReason(id, mode, check) {
+    let tab;
+    try { tab = await this.chrome.tabs.get(id); } catch { check(); return 'tab-unavailable'; }
+    check();
+    return this.modeOf(tab) !== mode ? 'browser-mode-mismatch' : null;
+  }
+  async windowAllowed(windowId, mode, check) {
+    // Chrome始终提供windows；旧的纯任务regular测试桩可以不实现它。
+    if (!this.chrome.windows?.get && mode === 'regular') return;
+    let window;
+    try { window = await this.chrome.windows.get(windowId); }
+    catch { check(); throw Object.assign(new Error('所选浏览器窗口已不可用'), { code: 'NO_BROWSER_WINDOW', outcome: 'not-dispatched' }); }
+    check();
+    this.assertMode(window, mode);
+    if (window.type !== undefined && window.type !== 'normal') throw Object.assign(new Error('没有普通浏览器窗口'), { code: 'NO_BROWSER_WINDOW', outcome: 'not-dispatched' });
+  }
+  async live(taskId, mode = 'regular') {
     const all = await this.chrome.tabs.query({});
     const actual = new Map(all.map(tab => [tab.id, tab]));
     let changed = false;
     for (const [id, record] of this.tabs) {
       const tab = actual.get(id);
+      if (this.modeOf(tab || record) !== mode) continue;
       // 用户把页移出原分组后，交还用户；不再复用或清理。
       if (!tab || (Number.isInteger(record.groupId) && record.groupId >= 0 && tab.groupId !== record.groupId)) { this.tabs.delete(id); changed = true; }
     }
     if (changed) await this.save();
-    return all.filter(tab => this.tabs.get(tab.id)?.taskId === taskId);
+    return all.filter(tab => this.modeOf(tab) === mode && this.tabs.get(tab.id)?.taskId === taskId);
   }
   validateTask(params) {
     const fail = message => { throw Object.assign(new Error(message), { code: 'INVALID_PARAMS' }); };
@@ -80,17 +107,24 @@ globalThis.AiBrowserTasks = class {
       return Array.isArray(tabs) && !tabs.some(tab => tab.id === tabId);
     } catch { return false; }
   }
-  async clean(taskId, finish, keep = [], check = () => {}, selectedIds, excludedIds = []) {
+  async clean(taskId, finish, keep = [], check = () => {}, selectedIds, excludedIds = [], mode = 'regular') {
     const before = new Map(this.tabs);
-    const live = await this.live(taskId);
+    const live = await this.live(taskId, mode);
     check();
     const closed = [], skipped = [];
+    for (const id of keep) {
+      if (live.some(tab => tab.id === id)) continue;
+      const reason = await this.selectedModeReason(id, mode, check);
+      if (reason) skipped.push({ tabId: id, reason });
+    }
     let excess = Math.max(0, live.length - 12);
     const selected = selectedIds !== undefined;
     const candidates = selected ? selectedIds.map(id => live.find(tab => tab.id === id) || { id }) :
       live.sort((a, b) => this.tabs.get(a.id).used - this.tabs.get(b.id).used || a.id - b.id);
     for (const tab of candidates) {
       check();
+      const modeReason = selected ? await this.selectedModeReason(tab.id, mode, check) : null;
+      if (modeReason) { skipped.push({ tabId: tab.id, reason: modeReason }); continue; }
       const record = this.tabs.get(tab.id);
       if (selected && (!record || record.taskId !== taskId)) {
         const previous = before.get(tab.id);
@@ -105,6 +139,7 @@ globalThis.AiBrowserTasks = class {
       try {
         const current = await this.chrome.tabs.get(tab.id);
         check();
+        if (this.modeOf(current) !== mode) { skipped.push({ tabId: tab.id, reason: 'browser-mode-mismatch' }); continue; }
         if (this.tabs.get(tab.id) !== record || record.taskId !== taskId || !Number.isInteger(record.groupId) || record.groupId < 0 || current.groupId !== record.groupId) {
           skipped.push({ tabId: tab.id, reason: 'outside-task-group' });
           if (this.tabs.get(tab.id) === record && Number.isInteger(record.groupId) && record.groupId >= 0) this.tabs.delete(tab.id);
@@ -122,19 +157,20 @@ globalThis.AiBrowserTasks = class {
     }
     await this.save();
     return { taskId, closed, closedCount: closed.length, ...(selected ? { requestedCount: selectedIds.length } : {}), skipped,
-      remaining: [...this.tabs.values()].filter(tab => tab.taskId === taskId).map(tab => tab.id),
+      remaining: live.filter(tab => this.tabs.get(tab.id)?.taskId === taskId).map(tab => tab.id),
       summary: closed.length ? '已独立核验关闭' + closed.length + '页' : '未核验关闭任何页面',
       verificationRequired: '仅依据closed中的已核验tabId报告关闭；closed为空时不得声称完成清理。skipped说明未关闭原因。' };
   }
   async adopt(params, check) {
-    const { taskId } = params, adopted = [], skipped = [];
-    await this.live(taskId);
+    const { taskId } = params, mode = this.mode(params), adopted = [], skipped = [];
+    await this.live(taskId, mode);
     for (const page of params.pages) {
       const skip = reason => skipped.push({ tabId: page.tabId, reason });
       try {
         check();
         let tab = await this.chrome.tabs.get(page.tabId);
         check();
+        if (this.modeOf(tab) !== mode) { skip('browser-mode-mismatch'); continue; }
         const existing = this.tabs.get(page.tabId);
         if (existing && existing.taskId !== taskId) { skip('other-task'); continue; }
         if (tab.url !== page.url) { skip('url-mismatch'); continue; }
@@ -142,14 +178,15 @@ globalThis.AiBrowserTasks = class {
         // 只以当前浏览器分组和已有归属决定目标组；不追认同组其他用户页。
         const all = await this.chrome.tabs.query({});
         check();
-        const taskGroups = new Set(all.filter(t => t.windowId === tab.windowId && t.groupId >= 0 &&
+        const taskGroups = new Set(all.filter(t => this.modeOf(t) === mode && t.windowId === tab.windowId && t.groupId >= 0 &&
           this.tabs.get(t.id)?.taskId === taskId && this.tabs.get(t.id)?.groupId === t.groupId).map(t => t.groupId));
-        const groupOwnedByOther = groupId => all.some(t => t.groupId === groupId && this.tabs.has(t.id) && this.tabs.get(t.id).taskId !== taskId);
+        const groupOwnedByOther = groupId => all.some(t => this.modeOf(t) === mode && t.groupId === groupId && this.tabs.has(t.id) && this.tabs.get(t.id).taskId !== taskId);
         if (tab.groupId >= 0 && groupOwnedByOther(tab.groupId)) { skip('other-task-group'); continue; }
         if (tab.groupId >= 0 && taskGroups.size && !taskGroups.has(tab.groupId)) { skip('outside-task-group'); continue; }
         // query/get等await之间页面发生变化时拒绝，不覆盖用户导航或分组操作。
         const current = await this.chrome.tabs.get(page.tabId);
         check();
+        if (this.modeOf(current) !== mode) { skip('browser-mode-mismatch'); continue; }
         if (current.url !== page.url || current.groupId !== page.groupId || current.windowId !== tab.windowId || this.tabs.get(page.tabId) !== existing) { skip('page-changed'); continue; }
         let targetGroup = tab.groupId;
         if (targetGroup === -1) {
@@ -162,10 +199,11 @@ globalThis.AiBrowserTasks = class {
           }
           tab = await this.chrome.tabs.get(page.tabId);
           check();
+          if (this.modeOf(tab) !== mode) { skip('browser-mode-mismatch'); continue; }
           if (tab.url !== page.url || tab.groupId !== targetGroup || tab.windowId !== current.windowId || this.tabs.get(page.tabId) !== existing) { skip('page-changed'); continue; }
         } else tab = current;
         // 此处无await，其他任务不能在最后一次归属核验和登记之间抢占。
-        this.tabs.set(page.tabId, { ...existing, id: page.tabId, taskId, name: params.taskName,
+        this.tabs.set(page.tabId, { ...existing, ...this.modeInfo(tab), id: page.tabId, taskId, name: params.taskName,
           groupId: targetGroup, key: existing?.key || 'url:' + page.url, used: Date.now(), keep: existing?.keep || false,
           modified: existing?.modified || false, provenance: 'agent-attested', evidence: { kind: page.evidence.kind, reference: page.evidence.reference } });
         // 每页完成即持久化；后续页超时或连接变化不能抹掉已完成页面的归属证据。
@@ -175,31 +213,34 @@ globalThis.AiBrowserTasks = class {
     }
     await this.save();
     return { taskId, adopted, adoptedCount: adopted.length, requestedCount: params.pages.length, skipped,
-      tabs: [...this.tabs.values()].filter(tab => tab.taskId === taskId),
+      tabs: (await this.live(taskId, mode)).map(tab => ({ ...this.tabs.get(tab.id), ...this.modeInfo(tab) })),
       verificationRequired: 'adopt仅登记agent明确提交的历史证据声明（agent-attested）；插件不能独立验证reference真伪，不表示已关闭页面。' };
   }
   async task(params, check = () => {}) {
     this.validateTask(params);
+    const mode = this.mode(params);
     // 在await前复制，避免调用方于异步处理中替换已校验的批次和证据。
     params = { ...params, tabIds: params.tabIds && [...params.tabIds], keepTabIds: params.keepTabIds && [...params.keepTabIds],
       pages: params.pages?.map(page => ({ ...page, evidence: { ...page.evidence } })) };
     const { taskId } = params;
     return this.serial(taskId, async () => {
       check();
-      if (['finish', 'cleanup', 'close'].includes(params.action)) return this.clean(taskId, params.action === 'finish', params.action === 'close' ? [] : params.keepTabIds, check, params.action === 'close' ? params.tabIds : undefined);
+      if (['finish', 'cleanup', 'close'].includes(params.action)) return this.clean(taskId, params.action === 'finish', params.action === 'close' ? [] : params.keepTabIds, check, params.action === 'close' ? params.tabIds : undefined, [], mode);
       if (params.action === 'adopt') {
         const work = this.adopting.catch(() => {}).then(() => this.adopt(params, check));
         this.adopting = work;
         return work;
       }
       const before = new Map(this.tabs);
-      await this.live(taskId);
+      const live = await this.live(taskId, mode);
       check();
       const unkept = [], skipped = [];
       if (params.action === 'unkeep') {
         for (const id of params.tabIds) {
+          const modeReason = await this.selectedModeReason(id, mode, check);
+          if (modeReason) { skipped.push({ tabId: id, reason: modeReason }); continue; }
           const record = this.tabs.get(id);
-          if (!record || record.taskId !== taskId) {
+          if (!record || record.taskId !== taskId || !live.some(tab => tab.id === id)) {
             skipped.push({ tabId: id, reason: record ? 'other-task' : before.get(id)?.taskId === taskId ? 'outside-task-group' : 'not-managed' });
             continue;
           }
@@ -208,18 +249,25 @@ globalThis.AiBrowserTasks = class {
         }
       }
       if (params.action === 'keep') {
-        for (const id of params.keepTabIds) if (this.tabs.get(id)?.taskId !== taskId) throw new Error('只能保留本任务创建的页面');
-        for (const id of params.keepTabIds) this.tabs.get(id).keep = true;
+        const keepIds = [];
+        for (const id of params.keepTabIds) {
+          const modeReason = await this.selectedModeReason(id, mode, check);
+          if (modeReason) { skipped.push({ tabId: id, reason: modeReason }); continue; }
+          if (!live.some(tab => tab.id === id) || this.tabs.get(id)?.taskId !== taskId) throw new Error('只能保留本任务创建的页面');
+          keepIds.push(id);
+        }
+        for (const id of keepIds) this.tabs.get(id).keep = true;
       }
       await this.save();
-      return { taskId, ...(params.action === 'unkeep' ? { unkept, skipped, requestedCount: params.tabIds.length } : {}),
-        tabs: [...this.tabs.values()].filter(tab => tab.taskId === taskId) };
+      return { taskId, ...(params.action === 'unkeep' ? { unkept, skipped, requestedCount: params.tabIds.length } : { skipped }),
+        tabs: live.map(tab => ({ ...this.tabs.get(tab.id), ...this.modeInfo(tab) })) };
     });
   }
   async open(params, windowId, check = () => {}) {
+    const mode = this.mode(params);
     const taskId = params.taskId || `task-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
     return this.serial(taskId, async () => {
-      let live = await this.live(taskId);
+      let live = await this.live(taskId, mode);
       const url = new URL(params.url).href;
       const key = params.reuseKey ? `key:${params.reuseKey}` : `url:${url}`;
       let tab = params.reuse === false ? null : live.find(tab => {
@@ -233,22 +281,33 @@ globalThis.AiBrowserTasks = class {
         if (await this.protect(tab)) tab = null;
       }
       if (tab) {
+        const record = this.tabs.get(tab.id);
+        await this.windowAllowed(windowId, mode, check);
+        const current = await this.chrome.tabs.get(tab.id);
         check();
+        this.assertMode(current, mode);
+        if (!record || this.tabs.get(tab.id) !== record || record.taskId !== taskId || record.keep || record.modified ||
+            current.windowId !== windowId || current.groupId !== record.groupId || current.url !== tab.url ||
+            current.active || current.pinned || current.audible || this.busy(current.id)) {
+          throw Object.assign(new Error('待复用页面已变化，请核对任务页'), { code: 'TARGET_CHANGED', outcome: 'not-dispatched' });
+        }
         // 同类页显式reuseKey可导航，默认只复用相同完整URL。
-        if (tab.url !== url) tab = await this.chrome.tabs.update(tab.id, { url });
-        this.tabs.get(tab.id).used = Date.now();
+        tab = current.url === url ? current : await this.chrome.tabs.update(current.id, { url });
+        record.used = Date.now();
         await this.save();
-        return { tab, taskId, reused: true, groupId: this.tabs.get(tab.id).groupId };
+        return { tab, taskId, reused: true, groupId: record.groupId };
       }
-      if (live.length > 12) { await this.clean(taskId, false, [], check); live = await this.live(taskId); }
+      if (live.length > 12) { await this.clean(taskId, false, [], check, undefined, [], mode); live = await this.live(taskId, mode); }
       if (live.length > 12 || (live.length >= 12 && !live.some(tab => {
         const record = this.tabs.get(tab.id);
         return !record.keep && !this.busy(tab.id) && Number.isInteger(record.groupId) && record.groupId >= 0 && tab.groupId === record.groupId;
       }))) throw Object.assign(new Error('本任务达到页面上限且没有足够可回收页，请先评估keep或执行中的页面'), { code: 'TASK_TAB_LIMIT' });
       check();
       // 显式open单独登记归属，不伪造网页派生的opener链。
+      await this.windowAllowed(windowId, mode, check);
       tab = await this.chrome.tabs.create({ windowId, url, active: false });
-      const record = { id: tab.id, taskId, name: params.taskName || this.tabs.get(live[0]?.id)?.name || `AI · ${new URL(url).hostname}`,
+      this.assertMode(tab, mode);
+      const record = { ...this.modeInfo(tab), id: tab.id, taskId, name: params.taskName || this.tabs.get(live[0]?.id)?.name || `AI · ${new URL(url).hostname}`,
         key, used: Date.now(), keep: false, modified: false };
       this.tabs.set(tab.id, record);
       // 先保存创建证据；分组失败仍不可清理该页。
@@ -262,14 +321,15 @@ globalThis.AiBrowserTasks = class {
         await this.chrome.tabGroups.update(record.groupId, { title: record.name.slice(0, 50), color: 'blue' });
         await this.save();
       } catch { groupError = '页面已创建并记录，浏览器未完成分组；该页不参与自动清理，勿重复打开'; }
-      if ((await this.live(taskId)).length > 12) {
-        await this.clean(taskId, false, [], check, undefined, [tab.id]);
-        if ((await this.live(taskId)).length > 12) throw Object.assign(new Error('本任务超过12页且没有足够可回收页；新页' + tab.id + '已创建，勿重复打开，请评估keep或执行中的页面'), { code: 'TASK_TAB_LIMIT' });
+      if ((await this.live(taskId, mode)).length > 12) {
+        await this.clean(taskId, false, [], check, undefined, [tab.id], mode);
+        if ((await this.live(taskId, mode)).length > 12) throw Object.assign(new Error('本任务超过12页且没有足够可回收页；新页' + tab.id + '已创建，勿重复打开，请评估keep或执行中的页面'), { code: 'TASK_TAB_LIMIT' });
       }
       // 超限回收不得返回刚被回收或已不存在的tabId。
       try { tab = await this.chrome.tabs.get(tab.id); }
       catch { throw Object.assign(new Error('新建页面已不可读取，请先list_tabs核对，勿重复打开'), { code: 'OPEN_TAB_UNAVAILABLE' }); }
       check();
+      this.assertMode(tab, mode);
       return { tab, taskId, reused: false, groupId: record.groupId, groupError };
     });
   }
@@ -289,15 +349,15 @@ globalThis.AiBrowserTasks = class {
         if (!record || record.taskId !== candidate.taskId || !Number.isInteger(record.groupId) || record.groupId < 0) return;
         const opener = await this.chrome.tabs.get(sourceTabId);
         let child = await this.chrome.tabs.get(tabId);
-        if (this.tabs.has(tabId) || this.tabs.get(opener.id) !== record || opener.groupId !== record.groupId || child.windowId !== opener.windowId ||
+        if (this.tabs.has(tabId) || this.tabs.get(opener.id) !== record || opener.groupId !== record.groupId || child.windowId !== opener.windowId || this.modeOf(child) !== this.modeOf(opener) ||
             (child.groupId >= 0 && child.groupId !== record.groupId)) return;
         await this.chrome.tabs.group({ tabIds: [child.id], groupId: record.groupId });
         child = await this.chrome.tabs.get(child.id);
-        if (this.tabs.has(tabId) || this.tabs.get(sourceTabId) !== record || child.groupId !== record.groupId) return;
-        this.tabs.set(child.id, { id: child.id, taskId: record.taskId, name: record.name, groupId: record.groupId,
+        if (this.tabs.has(tabId) || this.tabs.get(sourceTabId) !== record || child.groupId !== record.groupId || this.modeOf(child) !== this.modeOf(opener)) return;
+        this.tabs.set(child.id, { ...this.modeInfo(child), id: child.id, taskId: record.taskId, name: record.name, groupId: record.groupId,
           openerTabId: opener.id, key: 'child:' + child.id, used: Date.now(), keep: false, modified: false });
         await this.save();
-        await this.clean(record.taskId, false);
+        await this.clean(record.taskId, false, [], () => {}, undefined, [], this.modeOf(child));
       });
       this.adopting = registration;
       return registration;

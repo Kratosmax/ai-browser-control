@@ -355,7 +355,7 @@ test('an in-flight browser action rejects restart with MCP_BUSY and is never rep
   f.holdRpc();
   const action = f.client.call('browser_click', { tabId: 7, ref: 'r1-1' });
   const received = await f.arrival('/rpc');
-  assert.deepEqual(received.body, { method: 'click', params: { tabId: 7, ref: 'r1-1' } });
+  assert.deepEqual(received.body, { method: 'click', params: { tabId: 7, ref: 'r1-1', browserMode: 'regular' } });
   const since = f.client.notifications.length;
   errorCode(await f.client.call('browser_restart'), 'MCP_BUSY');
   assert.deepEqual(await f.client.request('ping'), {});

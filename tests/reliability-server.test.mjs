@@ -12,7 +12,7 @@ import { diagnosticEvent } from '../server/diagnostics.mjs';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const artifacts = path.join(root, 'temp/qa/reliability-20261113');
 const A = 'a'.repeat(32), B = 'b'.repeat(32);
-const headers = id => ({ Origin: 'chrome-extension://' + id, 'X-Client-Id': id, 'Content-Type': 'application/json' });
+const headers = id => ({ Origin: 'chrome-extension://' + id, 'X-Client-Id': id, 'X-Browser-Mode-Protocol': '1', 'Content-Type': 'application/json' });
 async function directory(t) {
   await fs.mkdir(artifacts, { recursive: true });
   const dir = await fs.mkdtemp(path.join(artifacts, 'C-runtime-'));

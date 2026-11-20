@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { createBridge } from '../server/bridge.mjs';
 const root=path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const EXT='chrome-extension://'+'a'.repeat(32);
-const headers={Origin:EXT,'X-Client-Id':'a'.repeat(32),'Content-Type':'application/json'};
+const headers={Origin:EXT,'X-Client-Id':'a'.repeat(32),'X-Browser-Mode-Protocol':'1','Content-Type':'application/json'};
 
 async function clientFixture(t) {
   const area=path.join(root,'temp','qa','reliability-20261113');await fs.mkdir(area,{recursive:true});
@@ -37,10 +37,11 @@ async function clientFixture(t) {
   const call=(name,args={})=>request('tools/call',{name,arguments:args});
   const post=(route,data)=>fetch(base+route,{method:'POST',headers,body:JSON.stringify(data)});
   await post('/pair',{});
-  const receive=async(name,args,payload)=>{
+  const receive=async(name,args,payload,checkCommand=()=>{})=>{
     const polling=fetch(base+'/poll',{headers});
     const end=Date.now()+1000;while((await (await fetch(base+'/status')).json()).client!==EXT){assert(Date.now()<end);await new Promise(resolve=>setTimeout(resolve,5));}
     const response=call(name,args);const command=await (await polling).json();
+    checkCommand(command);
     await post('/result',{id:command.id,...payload});return response;
   };
   return {call,receive};
@@ -56,12 +57,13 @@ test('real MCP exposes fixed recovery guidance for errors, partial batches and v
   assert.equal(failure.isError,true);const error=failure.structuredContent.error;
   assert.equal(error.recovery.category,'page-lifecycle');assert.equal(error.recovery.outcome,'not-dispatched');
   assert.equal(error.recovery.automaticReplay,false);assert.match(failure.content[0].text,/处理/);
-  const batch=await fixture.receive('browser_batch',{commands:[{method:'snapshot',params:{tabId:7,load:'current'}},{method:'snapshot',params:{tabId:9,load:'current'}}]},
-    {result:{results:[{ok:true,result:{title:'Healthy',elements:[]}},{ok:false,error:{code:'COMMAND_TIMEOUT',message:'Timeout fixture',outcome:'unverified',commandId:'fixture-child-1'}}]}});
+  const batch=await fixture.receive('browser_batch',{commands:[{method:'snapshot',params:{tabId:7,load:'current'}},{method:'snapshot',params:{tabId:9,load:'current',browserMode:'incognito'}}]},
+    {result:{results:[{ok:true,result:{title:'Healthy',elements:[]}},{ok:false,error:{code:'COMMAND_TIMEOUT',message:'Timeout fixture',outcome:'unverified',commandId:'fixture-child-1'}}]}},
+    command=>assert.deepEqual(command.params.commands.map(item=>item.params.browserMode),['regular','incognito']));
   const results=JSON.parse(batch.content[0].text);assert.equal(results[0].ok,true);assert.equal(results[0].result.title,'Healthy');
   assert.equal(results[1].error.recovery.category,'outcome-unknown');assert.equal(results[1].error.recovery.automaticReplay,false);
   assert.equal(results[1].error.commandId,'fixture-child-1');
-  const emptyTabs=await fixture.receive('browser_list_tabs',{}, {result:[]});
+  const emptyTabs=await fixture.receive('browser_list_tabs',{}, {result:[]}, command=>assert.equal(command.params.browserMode,'regular'));
   assert.equal(emptyTabs.isError,undefined);assert.deepEqual(JSON.parse(emptyTabs.content[0].text),[]);
   const tabs=await fixture.receive('browser_list_tabs',{}, {result:[{id:7,title:'Fixture'}]});
   assert.deepEqual(JSON.parse(tabs.content[0].text),[{id:7,title:'Fixture'}]);

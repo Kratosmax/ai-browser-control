@@ -82,3 +82,67 @@ test('快照目标查询与游标续页参数互斥且有界', () => {
     { cursor: 'opaque', load: 'auto' }
   ]) assert.throws(() => validateCommand('snapshot', { tabId: 7, ...extra }), { code: 'INVALID_ARGUMENTS' });
 });
+
+test('browserMode为可选模式参数：缺省默认regular，显式与非法值在受影响路径严格校验', () => {
+  const adoptPage = { tabId: 7, url: 'https://example.test/done', groupId: -1, evidence: { kind: 'agent-created', reference: '会话中browser_open回执tabId=7' } };
+  // 缺省一律合法（默认regular），不改变既有调用
+  for (const [method, params] of [
+    ['list_tabs', {}], ['snapshot', { tabId: 7 }], ['click', { tabId: 7, ref: 'r1-1' }], ['release', { tabId: 7 }],
+    ['open', { url: 'https://example.test/', taskId: 'a', taskName: '测试' }], ['task', { taskId: 'a', action: 'list' }]
+  ]) validateCommand(method, params);
+  // 显式regular/incognito在各关键路径被接受
+  for (const [method, params] of [
+    ['list_tabs', { browserMode: 'regular' }], ['list_tabs', { browserMode: 'incognito' }],
+    ['snapshot', { tabId: 7, browserMode: 'incognito' }],
+    ['click', { tabId: 7, ref: 'r1-1', browserMode: 'incognito', mode: 'dom' }],
+    ['screenshot', { tabId: 7, browserMode: 'incognito' }], ['release', { tabId: 7, browserMode: 'incognito' }],
+    ['open', { url: 'https://example.test/', taskId: 'a', taskName: '测试', browserMode: 'incognito' }],
+    ['open', { tabId: 7, url: 'https://example.test/', taskId: 'a', taskName: '测试', browserMode: 'regular' }],
+    ['task', { taskId: 'a', action: 'list', browserMode: 'incognito' }],
+    ['task', { taskId: 'a', action: 'close', tabIds: [7], browserMode: 'incognito' }],
+    ['task', { taskId: 'a', action: 'finish', keepTabIds: [8], browserMode: 'regular' }],
+    ['task', { taskId: 'a', action: 'adopt', taskName: '账单', pages: [adoptPage], browserMode: 'incognito' }],
+    ['snapshot', { tabId: 7, cursor: 'opaque', load: 'current', browserMode: 'incognito' }],
+    ['batch', { commands: [
+      { method: 'click', params: { tabId: 7, ref: 'r1-1', browserMode: 'incognito' } },
+      { method: 'snapshot', params: { tabId: 8, browserMode: 'regular' } }
+    ] }]
+  ]) validateCommand(method, params);
+  // 非法值在同类路径一律拒绝
+  for (const [method, params] of [
+    ['list_tabs', { browserMode: 'private' }],
+    ['snapshot', { tabId: 7, browserMode: 'auto' }],
+    ['release', { tabId: 7, browserMode: true }],
+    ['open', { url: 'https://example.test/', taskId: 'a', taskName: '测试', browserMode: 'private' }],
+    ['task', { taskId: 'a', action: 'list', browserMode: 'private' }],
+    ['snapshot', { tabId: 7, cursor: 'opaque', load: 'current', browserMode: 'private' }],
+    ['batch', { commands: [{ method: 'click', params: { tabId: 7, ref: 'r1-1', browserMode: 'private' } }] }]
+  ]) assert.throws(() => validateCommand(method, params), { code: 'INVALID_ARGUMENTS' });
+  // 游标续页允许browserMode，但其他筛选字段依旧被拒
+  assert.throws(() => validateCommand('snapshot', { tabId: 7, cursor: 'opaque', load: 'current', browserMode: 'incognito', name: '下载' }), { code: 'INVALID_ARGUMENTS' });
+});
+
+test('browserMode schema跨工具复用同一帮助文本；batch仅按子命令携带，管理工具不暴露', () => {
+  const names = ['list_tabs', 'open', 'task', 'snapshot', 'scroll', 'click', 'hover', 'focus', 'drag', 'select', 'set_checked', 'inspect', 'wait', 'fill', 'press', 'navigate', 'screenshot', 'release'];
+  const props = names.map(name => tools.find(t => t.name === `browser_${name}`).inputSchema.properties.browserMode);
+  assert.equal(props.length, names.length);
+  assert.ok(props.every(Boolean));
+  for (const prop of props) {
+    assert.equal(prop.type, 'string');
+    assert.deepEqual(prop.enum, ['regular', 'incognito']);
+    assert.equal(prop.default, 'regular');
+    assert.ok(prop.description.length > 20);
+  }
+  assert.equal(new Set(props.map(prop => JSON.stringify(prop))).size, 1);
+  for (const name of names) assert.ok(!tools.find(t => t.name === `browser_${name}`).inputSchema.required.includes('browserMode'));
+  for (const name of ['status', 'restart', 'batch']) assert.ok(!Object.hasOwn(tools.find(t => t.name === `browser_${name}`).inputSchema.properties, 'browserMode'));
+  const described = name => tools.find(t => t.name === 'browser_' + name).description;
+  assert.match(described('open'), /BROWSER_MODE_MISMATCH/);
+  assert.match(described('open'), /NO_BROWSER_WINDOW/);
+  assert.match(described('open'), /不回落/);
+  assert.match(described('open'), /opt-in/);
+  assert.match(described('list_tabs'), /筛选/);
+  assert.match(described('task'), /browserMode/);
+  assert.match(described('snapshot'), /browserMode/);
+  assert.match(described('batch'), /单独/);
+});

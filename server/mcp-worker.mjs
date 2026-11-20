@@ -44,7 +44,13 @@ async function callTool(name, args) {
       mcpState: 'ready', restartRequired: mcpDiskVersion === null ? null : mcpDiskVersion !== VERSION,
       setup: where + '：' + state + '。目标页未授权且未开自动授权时，工具会报“该标签页尚未手动授权”。' }) }] };
   }
-  const data = await bridgeRequest('/rpc', { port: PORT, host: HOST, token: TOKEN, body: { method: name.slice('browser_'.length), params: browserRequestParams(name, args) } });
+  const method = name.slice('browser_'.length);
+  const argsForBrowser = browserRequestParams(name, args);
+  // 明传默认模式。旧桥的严格 schema 会在派发前拒绝新参数。
+  const params = method === 'batch' ? { commands: argsForBrowser.commands.map(command => ({
+    ...command, params: { browserMode: 'regular', ...command.params }
+  })) } : { browserMode: 'regular', ...argsForBrowser };
+  const data = await bridgeRequest('/rpc', { port: PORT, host: HOST, token: TOKEN, body: { method, params } });
   if (name === 'browser_snapshot' && args.format === 'compact') data.result = compactSnapshot(data.result);
   if (name === 'browser_batch') data.result.results.forEach((item, index) => {
     if (!item.ok && item.error) item.error = {...item.error,recovery:recoveryForError(item.error)};

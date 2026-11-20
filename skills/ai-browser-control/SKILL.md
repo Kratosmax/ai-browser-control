@@ -13,6 +13,8 @@ description: 通过本插件 MCP 按标签页读取和操作真实 Edge/Chrome�
 
 ## 流程
 
+默认使用普通浏览器窗口。用户明确指定无痕模式时，列页、打开、读写、续页、批次子项和任务管理都传 `browserMode: "incognito"`，并核对结果的模式。请用户在需要时处理浏览器的扩展无痕权限。普通窗口缺失时，说明需要普通窗口。
+
 1. `browser_status` 检查连接，再 `browser_list_tabs` 核对实际标签及managed/taskId；已有operation时按其commandId/phase/timedOut判断该页是否仍被未结束命令占用，不能只凭桥pending=0认为可再次派发。用户明确指定已打开页时操作该页；普通新任务按[任务页面、并行与验收](references/tasks-and-verification.md)选择唯一taskId及任务名称，用`browser_open(url,taskId,taskName)`后台打开、分组并复用本任务插件页，不能默认复用用户原有的同网址页面。该通道独立于客户端内置浏览器，内置列表为空不证明外部浏览器没有标签页。
    可传已有授权tabId选窗口；根据返回tabId继续读取，授权不足由用户处理；没有窗口不另行启动前台浏览器。某几页已用完而总任务未结束时，用browser_task(action=close,tabIds=[...])仅结束这些页面的操作；整个任务结束才finish。交付页先keep；按closedCount和skipped汇报，关闭0页不能称清理完成。未登记页有真实AI创建记录才adopt补登记，不按标题猜归属；用户原有页不纳入清理。
 2. 扩展未连接或工具不可用时先立即停止并按故障交接报告，不能只要求重载后继续重试。若已明确是目标页未授权，说明该权限缺口，由用户授权此页；agent不自行更改用户权限、自动授权或CDP开关。

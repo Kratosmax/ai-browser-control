@@ -49,7 +49,7 @@ test('扩展诊断须配对、有批次大小限制，落盘只保留固定元�
   const bridge = createBridge({ port: 0, configDir: dir, pollTimeout: 20 });
   const port = await bridge.start(), base = `http://127.0.0.1:${port}`;
   const id = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
-  const headers = { Origin: `chrome-extension://${id}`, 'X-Client-Id': id, 'Content-Type': 'application/json' };
+  const headers = { Origin: `chrome-extension://${id}`, 'X-Client-Id': id, 'X-Browser-Mode-Protocol': '1', 'Content-Type': 'application/json' };
   const post = (route, body) => fetch(base + route, { method: 'POST', headers, body: JSON.stringify(body) });
   try {
     assert.equal((await post('/diagnostics', { events: [] })).status, 403);
@@ -102,7 +102,7 @@ test('page_result HTTP 上报落盘保留枚举与一致性布尔值，丢弃任
   const bridge = createBridge({ port: 0, configDir: dir, pollTimeout: 20 });
   const port = await bridge.start(), base = 'http://127.0.0.1:' + port;
   const id = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
-  const headers = { Origin: 'chrome-extension://' + id, 'X-Client-Id': id, 'Content-Type': 'application/json' };
+  const headers = { Origin: 'chrome-extension://' + id, 'X-Client-Id': id, 'X-Browser-Mode-Protocol': '1', 'Content-Type': 'application/json' };
   const post = (route, body) => fetch(base + route, { method: 'POST', headers, body: JSON.stringify(body) });
   try {
     await post('/pair', {});

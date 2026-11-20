@@ -2,9 +2,9 @@
 
 让支持 MCP 的 AI 助手按标签页读取和操作真实 Edge / Chrome。后台操作不切换标签页、不移动系统鼠标。
 
-当前版本：0.17.3。系统性加固原生清理锁、权限代次、截图回传、DOM/表单身份与拖拽阶段校验，以及RPC畸形结果和启动器超时结算。新增固定可靠性验收入口、机器可读故障处理指引、版本与启动器加载状态检查。通过表示列明场景已验证，不代表所有网站无缺陷；不自动重放业务或更改用户权限。本仓库提供源码，不另设此版本的 GitHub Release。
+当前版本为 0.17.4。Agent 默认枚举、打开和操作普通标签页。用户明确要求无痕模式时，在相应工具参数中指定 `browserMode: "incognito"`。更新后需让 MCP 工作进程、桥和浏览器扩展均加载新版。`browser_status` 的 `browserModeProtocol: 1` 表示已配对扩展支持模式校验。
 
-本版更新了MCP启动器：在宿主MCP管理中断开并重连，再到浏览器扩展管理页重载扩展，使本版全部生效。browser_restart仅重载worker；launcherHealth未知或过期时不能声称启动器已更新。无需为此刷新业务网页，新的Agent10与旧代理并存并要求重新snapshot取新引用。
+从 0.17.2 或更早版本升级时，宿主 MCP 还需断开并重连，以加载 0.17.3 的启动器变更。
 
 ## 开始使用
 
@@ -60,7 +60,7 @@ DOM内容读取仍走隔离脚本，导航走tabs.update。仅当独立后台唤
 | --- | --- |
 | browser_status | MCP、桥与扩展的实际版本和连接状态 |
 | browser_restart | 重载本MCP工作进程以加载磁盘新版，保持stdio连接；在途操作拒绝，不重放动作 |
-| browser_list_tabs | HTTP(S) 标签页、授权状态及 inputMode/screenshotMode |
+| browser_list_tabs | 按模式列出 HTTP(S) 标签页、`incognito`、授权状态及输入和截图方式 |
 | browser_snapshot | 默认滚动探测懒加载；返回当前正文、ref 与累计观察。load=current 仅回读 |
 | browser_scroll | 主文档或指定容器向上/下、顶部/底部滚动；不点击、不切页 |
 | browser_click | 按 ref 点击 |
@@ -83,7 +83,11 @@ DOM内容读取仍走隔离脚本，导航走tabs.update。仅当独立后台唤
 
 0.10.1把tabindex控件，以及由aria-haspopup+controls/owns关联或具备menu/listbox角色的可见弹层内列表项、自绘指针项纳入定位。快照标记inPopup并优先保留这些选项；没有标准role的选项仍按真实角色返回，不虚构menuitem。inspect触发器可见关联popups状态和候选项数。此为DOM候选识别，不等于所有列表项都必然绑定了点击处理器。
 
-0.12.0共20个工具。AI要新开网址时用browser_open(url,taskId,taskName)，可选已有授权tabId确定所属窗口；不传则用最近普通窗口。创建固定active=false，不调用窗口激活或新建窗口；没有窗口则报错。回执包含tabId、reused、taskId/groupId、active、窗口focus前后状态和授权状态；自动授权关闭时不擅自授权新页。browser_navigate仍用于用户指定的已有页。网页按钮自行window.open或用户手动新建页面不由此接口改写。
+### 普通窗口与无痕窗口
+
+- `browser_list_tabs()` 默认只列普通页，带 `browserMode: "incognito"` 时只列已获浏览器扩展无痕权限的无痕页。每行的 `incognito` 和 `browserMode` 来自实际标签页属性。
+- `browser_open` 在匹配模式的已有窗口中开后台页。最近焦点落在无痕窗口时，默认请求仍会选择普通窗口。提供已有授权 `tabId` 时，该页所属模式必须匹配。没有合适窗口时报错，请在需要的模式下打开一个窗口。每次打开返回实际模式、授权及焦点状态。
+- 无痕请求须逐次指定模式，包含快照续页、导航、截图、释放、批次子项与任务管理。任务列表、复用、限额与清理按模式区分。使用无痕页需要用户明确指定，并在浏览器中允许扩展访问无痕窗口。已允许访问后，插件仍默认使用普通页。
 
 ### 任务页面与多页工作
 
@@ -236,7 +240,7 @@ node scripts/check-reliability.mjs --all --dry-run
 node scripts/check-reliability.mjs --all
 ```
 
-默认不带参数或--unit运行全部源码单元文件；--native运行4个已审计的私有Edge套件。前置缺失、漏测目录、崩溃、超时、失败或中断均不能判成完成通过；输出精确清单、产品版本、Git状态和阶段日志。dry-run只验证计划/前置，不是用例通过。新增源码测试自动发现，不把temp历史夹具算进发布测试。
+默认不带参数或--unit运行全部源码单元文件；--native运行5个已审计的私有Edge套件。前置缺失、漏测目录、崩溃、超时、失败或中断均不能判成完成通过；输出精确清单、产品版本、Git状态和阶段日志。dry-run只验证计划/前置，不是用例通过。新增源码测试自动发现，不把temp历史夹具算进发布测试。
 
 单独调试的既有回归命令：
 
@@ -253,7 +257,7 @@ python -B tests/browser-custom-controls.py --source current --label local-check
 python -B tests/browser-wait-lifecycle.py
 ```
 
-Python 项仅供开发验收，依赖测试机已有 Python Playwright、Pillow 和 Edge；browser-frozen.py、browser-lifecycle-wake.py和browser-wait-lifecycle.py另需已有websocket-client以便只连接私有测试浏览器、不自动附加页面。不属于运行时依赖，不自动安装或复制全局工具。UI 对照测试还需要 Git 历史中的基线提交（见 REQUIREMENTS.md）；纯 ZIP 没有该历史时无法生成旧版对照。它们使用独立临时浏览器配置和测试桥，不控制用户的标签页。证据输出到 `temp/qa/`。无 CDP 截图正向夹具的额外权限与正式清单不同，具体限制在测试记录中明确列出。
+Python 项仅供开发验收，依赖测试机已有 Python Playwright、Pillow 和 Edge；browser-frozen.py、browser-lifecycle-wake.py、browser-wait-lifecycle.py和browser-modes.py另需已有websocket-client以便只连接私有测试浏览器、不自动附加页面。不属于运行时依赖，不自动安装或复制全局工具。UI 对照测试还需要 Git 历史中的基线提交（见 REQUIREMENTS.md）；纯 ZIP 没有该历史时无法生成旧版对照。它们使用独立临时浏览器配置和测试桥，不控制用户的标签页。证据输出到 `temp/qa/`。无 CDP 截图正向夹具的额外权限与正式清单不同，具体限制在测试记录中明确列出。
 
 本地预览包放在 `temp/ai-browser-control-local-preview.zip`；这是源码预览，不是正式 Release。解压后可加载其中的 `extension` 目录，不包含 Node 或浏览器副本。
 

@@ -12,7 +12,7 @@ const EXT_A = 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const EXT_B = 'chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 const ID_A = EXT_A.slice('chrome-extension://'.length);
 const ID_B = EXT_B.slice('chrome-extension://'.length);
-const headers = origin => ({ Origin: origin, 'X-Client-Id': origin.slice('chrome-extension://'.length), 'Content-Type': 'application/json' });
+const headers = origin => ({ Origin: origin, 'X-Client-Id': origin.slice('chrome-extension://'.length), 'X-Browser-Mode-Protocol': '1', 'Content-Type': 'application/json' });
 
 test('一键配对白名单：网页拒绝、首连登记、占用互斥、可解除', async () => {
   const configDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zcode-bridge-test-'));
@@ -185,6 +185,44 @@ async function isolatedBridge(t, options = {}) {
   await post('/pair', EXT_A); await post('/pair', EXT_B);
   return { port, get, post, state, waitFor, rpc: () => post('/rpc', null, { method: 'snapshot', params: { tabId: 42 } }) };
 }
+
+test('旧扩展无法接收默认模式请求，重载降级也不会派发已排队的普通请求', async t => {
+  const { port, get, post, state, waitFor, rpc } = await isolatedBridge(t, { pollTimeout: 50 });
+  const legacyPoll = () => fetch('http://127.0.0.1:' + port + '/poll', {
+    headers: { Origin: EXT_A, 'X-Client-Id': ID_A }
+  });
+  const expectBlocked = async response => {
+    assert.equal(response.status, 409);
+    const result = await response.json();
+    assert.equal(result.code, 'BROWSER_MODE_EXTENSION_UPDATE_REQUIRED');
+    assert.equal(result.outcome, 'not-dispatched');
+  };
+  assert.equal((await legacyPoll()).status, 204);
+  assert.equal((await state()).browserModeProtocol, null);
+  await expectBlocked(await rpc());
+  assert.equal((await get('/poll', EXT_A)).status, 204);
+  assert.equal((await state()).browserModeProtocol, 1);
+  const queued = rpc();
+  await waitFor(status => status.pending === 1);
+  const rolledBack = legacyPoll();
+  await expectBlocked(await queued);
+  assert.equal((await rolledBack).status, 204);
+  assert.equal((await state()).pending, 0);
+
+  const activePoll = get('/poll', EXT_A);
+  await waitFor(status => status.browserModeProtocol === 1);
+  const fresh = rpc();
+  const command = await (await activePoll).json();
+  const nextPoll = get('/poll', EXT_A);
+  await post('/result', EXT_A, { id: command.id, result: { fresh: true } });
+  assert.deepEqual((await (await fresh).json()).result, { fresh: true });
+  assert.equal((await state()).browserModeProtocol, 1, '结果回传不是新的模式能力声明');
+  const nextRpc = rpc();
+  const received = await (await nextPoll).json();
+  assert.notEqual(received.id, command.id);
+  await post('/result', EXT_A, { id: received.id, result: { continued: true } });
+  assert.deepEqual((await (await nextRpc).json()).result, { continued: true });
+});
 
 test('活跃租约覆盖轮询间隙；到期切换拒绝原客户端排队命令且不重放', async t => {
   const { get, post, state, waitFor, rpc } = await isolatedBridge(t, { leaseMs: 150, staleAfterMs: 50, pollTimeout: 30 });

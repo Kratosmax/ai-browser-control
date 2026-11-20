@@ -13,6 +13,9 @@ policy(['TAB_BUSY'],'operation-running','verify-original-operation',false,'本�
 policy(['COMMAND_NOT_DISPATCHED'],'connection','restore-connection',false,'确认正式命令通道和实际版本恢复，再在原授权范围发起新请求；不自动重放。');
 policy(['COMMAND_TIMEOUT','CONNECTION_INVALIDATED'],'outcome-unknown','preserve-and-verify',true,'停止依赖该结果的步骤，保留命令编号、阶段及operation；核对实际状态后交接维护，不自动重放或清锁。');
 policy(['CDP_DISABLED','UNAUTHORIZED','PAGE_NOT_AUTHORIZED'],'permission','verify-permission',false,'核对当前页面授权及该用途的独立开关；由用户处理缺口，不自行修改权限或扩大用途。');
+policy(['BROWSER_MODE_MISMATCH'],'browser-mode','verify-browser-mode',false,'仅在用户明确要求该模式时使用；按页面实际模式修正请求范围后重发管理类动作（close/finish等按各页真实模式分别执行）；不自行切换窗口模式、不修改扩展权限、不开启无痕、不重放业务动作。');
+policy(['NO_BROWSER_WINDOW'],'browser-window','verify-browser-window',false,'当前没有可用浏览器窗口；等用户打开并授权对应模式的窗口后再继续；不自行拉起浏览器、不切换模式、不修改权限。');
+policy(['BROWSER_MODE_EXTENSION_UPDATE_REQUIRED'],'extension-update','reload-extension',true,'已连接扩展缺少所选模式能力；请用户重载或更新扩展，再用browser_status核对实际版本与能力后继续；不开启无痕、不修改权限、不重放。');
 policy(['MCP_BUSY','MCP_RESTARTING'],'maintenance-window','wait-for-maintenance',false,'等待正在进行的管理操作结束，再核对实际版本和连接；不重放业务请求。');
 policy(['INVALID_PARAMS','INVALID_ARGUMENTS'],'request','correct-request',false,'按当前工具参数约束修正请求；已有动作结果未知时先核对，不能直接重发。');
 policy(['INVALID_EXTENSION_RESULT','BRIDGE_INVALID_RESPONSE','BRIDGE_REQUEST_TIMEOUT','BRIDGE_TRANSPORT_ERROR','MCP_WORKER_TIMEOUT','MCP_WORKER_EXITED','MCP_WORKER_STOP_FAILED'],

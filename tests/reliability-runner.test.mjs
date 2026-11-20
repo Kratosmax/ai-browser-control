@@ -100,16 +100,18 @@ test('discoverUnitTests: 目录全部不可读或零测试都显式报错，不�
   await fsp.rm(base, { recursive: true, force: true });
 });
 
-test('NATIVE_ALLOWLIST: 固定四个已审计脚本与参数（wait-lifecycle 无 baseline，custom-controls current+reliability）', async () => {
+test('NATIVE_ALLOWLIST: 固定已审计脚本与参数（wait-lifecycle 无 baseline，custom-controls current+reliability）', async () => {
   assert.deepEqual(NATIVE_ALLOWLIST.map(entry => entry.file), [
     'tests/browser-frozen.py',
     'tests/browser-lifecycle-wake.py',
     'tests/browser-custom-controls.py',
     'tests/browser-wait-lifecycle.py',
+    'tests/browser-modes.py',
   ]);
   const byId = Object.fromEntries(NATIVE_ALLOWLIST.map(entry => [entry.id, entry]));
   assert.deepEqual(byId['browser-custom-controls'].fixedArgs, ['--source', 'current', '--label', 'reliability']);
   assert.deepEqual(byId['browser-wait-lifecycle'].fixedArgs, []);
+  assert.deepEqual(byId['browser-modes'].fixedArgs, []);
   for (const entry of NATIVE_ALLOWLIST) {
     await assert.ok(fs.existsSync(path.join(root, entry.file)), '允许清单文件应存在: ' + entry.file);
   }
@@ -331,10 +333,11 @@ test('CLI --list: 退出 0，列出与磁盘一致的计划（unit 动态 + nati
   assert.match(output, /unit \(\d+\):/);
   assert.match(output, /node tests\/bridge\.test\.mjs/);
   assert.match(output, /node extension\/tests\/mock\.test\.cjs/);
-  assert.match(output, /native \(4\):/);
+  assert.match(output, new RegExp(`native \\(${NATIVE_ALLOWLIST.length}\\):`));
   assert.match(output, /python -B tests\/browser-frozen\.py/);
   assert.match(output, /python -B tests\/browser-custom-controls\.py --source current --label reliability/);
   assert.match(output, /python -B tests\/browser-wait-lifecycle\.py(\s|$)/);
+  assert.match(output, /python -B tests\/browser-modes\.py(\s|$)/);
   const expected = await discoverUnitTests(root);
   const listed = output.split(/\r?\n/).filter(line => /^  node /.test(line)).map(line => line.trim().slice(5));
   assert.deepEqual(listed, expected, '--list 输出必须与发现结果一致');

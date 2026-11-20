@@ -8,6 +8,10 @@
 
 browser_status.versionHealth仅检查MCP/桥/扩展是否对齐，状态unknown保持未知；launcherHealth独立检查启动器已加载代码。browser_restart只更新worker，启动器过期需由宿主MCP断开重连；旧启动器没有观测信息时不能按磁盘版本冒充加载成功。连接或版本正常也不证明原页面无operation。
 
+## 普通和无痕窗口选择
+
+`BROWSER_MODE_MISMATCH` 表示目标页和请求模式不同，先根据用户原意核对模式和标签。`NO_BROWSER_WINDOW` 表示匹配模式没有可用窗口。仅在用户已指定无痕场景时核对浏览器的扩展无痕权限。`BROWSER_MODE_EXTENSION_UPDATE_REQUIRED` 表示已配对扩展尚不支持模式校验，更新并重载目标扩展后核对 `browser_status.browserModeProtocol` 是否为 1。
+
 ## 首次发现时立即执行
 
 1. 第一次出现工具不可用就停止依赖该能力的业务，立即用一句话告诉用户：“浏览器插件的某能力不可用，已停止相关操作，正在整理故障报告。”不要先花几分钟反复重试再汇报。

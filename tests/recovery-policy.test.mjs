@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { recoveryForError, versionHealthForStatus } from '../server/recovery-policy.mjs';
 
 test('unknown outcomes never become proof of no dispatch or automatic retry', () => {
-  for (const code of ['STALE_REF','TAB_FROZEN','TAB_BUSY','COMMAND_TIMEOUT','CDP_DISABLED','PAGE_AGENT_API_ERROR','PRIVATE-CODE']) {
+  for (const code of ['STALE_REF','TAB_FROZEN','TAB_BUSY','COMMAND_TIMEOUT','CDP_DISABLED','PAGE_AGENT_API_ERROR','BROWSER_MODE_MISMATCH','NO_BROWSER_WINDOW','BROWSER_MODE_EXTENSION_UPDATE_REQUIRED','PRIVATE-CODE']) {
     for (const outcome of [undefined,'unverified','verified','ok',false]) {
       const result = recoveryForError({code,outcome});
       assert.equal(result.outcome,'unverified'); assert.equal(result.automaticReplay,false);
@@ -40,4 +40,25 @@ test('missing version stays unknown, alignment never asserts a working browser',
   const aligned=versionHealthForStatus({mcpDiskVersion:'0.17.3',mcpVersion:'0.17.3',version:'0.17.3',extensionVersion:'0.17.3',connected:false});
   assert.equal(aligned.state,'aligned'); assert.equal(aligned.pageReadiness,'check-per-page');
   assert.equal(versionHealthForStatus({mcpVersion:'PRIVATE-VERSION',version:'PRIVATE-BRIDGE'}).state,'unknown');
+});
+
+test('browser mode faults give fixed guidance without mode switching, permission edits or incognito push', () => {
+  const mismatch = recoveryForError({ code: 'BROWSER_MODE_MISMATCH' });
+  const noWindow = recoveryForError({ code: 'NO_BROWSER_WINDOW', outcome: 'not-dispatched' });
+  const update = recoveryForError({ code: 'BROWSER_MODE_EXTENSION_UPDATE_REQUIRED' });
+  for (const result of [mismatch, noWindow, update]) {
+    assert.equal(result.automaticReplay, false);
+    assert.match(result.instruction, /不(自行)?修改(扩展)?权限/);
+    assert.doesNotMatch(result.instruction, /(请|可|建议|尝试)[^。]{0,8}(开启|启用)无痕/);
+  }
+  assert.equal(mismatch.category, 'browser-mode'); assert.equal(mismatch.action, 'verify-browser-mode');
+  assert.equal(mismatch.maintenanceRequired, false);
+  assert.match(mismatch.instruction, /不自行切换/); assert.match(mismatch.instruction, /不开启无痕/);
+  assert.equal(noWindow.category, 'browser-window'); assert.equal(noWindow.outcome, 'not-dispatched');
+  assert.match(noWindow.instruction, /不自行拉起/);
+  assert.equal(update.category, 'extension-update'); assert.equal(update.action, 'reload-extension');
+  assert.equal(update.maintenanceRequired, true);
+  assert.match(update.instruction, /browser_status/); assert.match(update.instruction, /核对实际版本/);
+  assert.equal(new Set([mismatch.category, noWindow.category, update.category]).size, 3);
+  assert.equal(recoveryForError({ code: 'CDP_DISABLED' }).category, 'permission');
 });

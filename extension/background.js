@@ -241,9 +241,22 @@ function withTab(tabId, action) {
   return next;
 }
 
+function requestedBrowserMode(params) {
+  const mode = params.browserMode === undefined ? 'regular' : params.browserMode;
+  if (!['regular', 'incognito'].includes(mode)) throw Object.assign(new Error('browserMode必须为regular或incognito'), { code: 'INVALID_ARGUMENTS', outcome: 'not-dispatched' });
+  return mode;
+}
+function actualBrowserMode(target) { return target.incognito === true ? 'incognito' : 'regular'; }
+function browserModeInfo(target) { return { incognito: target.incognito === true, browserMode: actualBrowserMode(target) }; }
+function assertBrowserMode(target, mode) {
+  if (actualBrowserMode(target) !== mode) throw Object.assign(new Error('目标与请求的浏览器模式不一致'), { code: 'BROWSER_MODE_MISMATCH', outcome: 'not-dispatched' });
+}
+function normalBrowserWindow(window) { return Number.isInteger(window?.id) && window.id >= 0 && (window.type === undefined || window.type === 'normal'); }
 // 核对页面访问授权；冻结页是否可临时唤醒由独立生命周期用途决定。
 async function ensureAllowed(tabId, check = () => {}) {
   const tab = await browserStep(check, 'tabs.get', () => chrome.tabs.get(tabId));
+  if (check.browserMode !== undefined) assertBrowserMode(tab, check.browserMode);
+  check.tabBrowserMode = browserModeInfo(tab);
   check.lifecycle = pageResultDiagnostic({ tabStatus: tab.status, frozen: tab.frozen, discarded: tab.discarded });
   if (!isHttpUrl(tab.url)) throw new Error('仅允许操作 HTTP(S) 标签页');
   if (revoked.has(tabId) || (!authorized.has(tabId) && !autoAuthorize)) throw new Error('该标签页尚未手动授权或已释放，请在弹窗中授权此页');
@@ -676,13 +689,13 @@ async function press(tabId, key, check = () => {}) {
   }
 }
 
-async function listTabs(check = () => {}) {
+async function listTabs(check = () => {}, mode = 'regular') {
   await taskTabs.ready;
   const tabs = await browserStep(check, 'tabs.query', () => chrome.tabs.query({}));
-  return tabs.filter((tab) => isHttpUrl(tab.url)).map((tab) => {
+  return tabs.filter((tab) => isHttpUrl(tab.url) && actualBrowserMode(tab) === mode).map((tab) => {
     const useCdp = cdpEnabled && !domFallbackTabs.has(tab.id);
     return {
-    id: tab.id,
+    id: tab.id, ...browserModeInfo(tab),
     title: tab.title || '',
     url: tab.url,
     active: Boolean(tab.active),
@@ -717,6 +730,11 @@ async function listTabs(check = () => {}) {
 }
 
 async function release(tabId, check = () => {}) {
+  if (check.browserMode !== undefined) {
+    const tab = await browserStep(check, 'tabs.get', () => chrome.tabs.get(tabId));
+    assertBrowserMode(tab, check.browserMode);
+    check.tabBrowserMode = browserModeInfo(tab);
+  }
   const tracked = authorized.has(tabId) || attached.has(tabId) || (autoAuthorize && !revoked.has(tabId));
   if (!tracked) throw new Error('该标签页尚未授权');
   try { await pageAgent(tabId, 'hideCursor', undefined, check); } catch {}
@@ -770,7 +788,9 @@ async function execute(command, check = () => {}) {
   if (method === 'status') {
     return { bridge: `http://127.0.0.1:${bridgePort}`, port: bridgePort, autoAuthorize, authorizedTabIds: [...authorized] };
   }
-  if (method === 'list_tabs') return listTabs(check);
+  const browserMode = requestedBrowserMode(params);
+  check.browserMode = browserMode;
+  if (method === 'list_tabs') return listTabs(check, browserMode);
   if (method === 'task') return taskTabs.task(params, check);
   if (method === 'batch') {
     const results = await Promise.all(params.commands.map(async (item, index) => {
@@ -792,19 +812,30 @@ async function execute(command, check = () => {}) {
   if (method === 'open') {
     if (typeof params.url !== 'string' || !isHttpUrl(params.url)) throw Object.assign(new Error('url必须是HTTP(S)地址'), { code: 'INVALID_ARGUMENTS' });
     let windowId;
-    if (params.tabId !== undefined) windowId = (await ensureAllowed(requireTabId(params.tabId), check)).windowId;
+    if (params.tabId !== undefined) windowId = await withTab(requireTabId(params.tabId), async () => (await ensureAllowed(params.tabId, check)).windowId);
     else {
-      try { windowId = (await browserStep(check, 'windows.getLastFocused', () => chrome.windows.getLastFocused({ windowTypes: ['normal'] }))).id; }
-      catch (error) { check(); throw Object.assign(new Error('没有可用的普通浏览器窗口，请先手动打开窗口；插件不会激活或新建窗口'), { code: 'NO_BROWSER_WINDOW' }); }
+      let chosen;
+      try { chosen = await browserStep(check, 'windows.getLastFocused', () => chrome.windows.getLastFocused({ windowTypes: ['normal'] })); }
+      catch { check(); }
+      if (!normalBrowserWindow(chosen) || actualBrowserMode(chosen) !== browserMode) {
+        let windows = [];
+        try { windows = await browserStep(check, 'windows.get', () => chrome.windows.getAll({ windowTypes: ['normal'] })); } catch { check(); }
+        chosen = windows.find(window => normalBrowserWindow(window) && actualBrowserMode(window) === browserMode);
+      }
+      windowId = chosen?.id;
     }
-    if (!Number.isInteger(windowId) || windowId < 0) throw Object.assign(new Error('没有可用的普通浏览器窗口'), { code: 'NO_BROWSER_WINDOW' });
-    const beforeWindow = await browserStep(check, 'windows.get', () => chrome.windows.get(windowId));
+    if (!Number.isInteger(windowId) || windowId < 0) throw Object.assign(new Error('没有所选模式的普通浏览器窗口，请先手动打开窗口；插件不会激活或新建窗口'), { code: 'NO_BROWSER_WINDOW', outcome: 'not-dispatched' });
+    let beforeWindow;
+    try { beforeWindow = await browserStep(check, 'windows.get', () => chrome.windows.get(windowId)); }
+    catch { check(); throw Object.assign(new Error('所选浏览器窗口已不可用'), { code: 'NO_BROWSER_WINDOW', outcome: 'not-dispatched' }); }
+    assertBrowserMode(beforeWindow, browserMode);
+    if (!normalBrowserWindow(beforeWindow)) throw Object.assign(new Error('目标不是普通浏览器窗口'), { code: 'NO_BROWSER_WINDOW', outcome: 'not-dispatched' });
     check();
     const opened = await browserStep(check, 'tabs.create', () => taskTabs.open(params, windowId, check));
     const { tab } = opened;
     const afterWindow = await browserStep(check, 'windows.get', () => chrome.windows.get(windowId));
     return { opened: !opened.reused, reused: opened.reused, taskId: opened.taskId, groupId: opened.groupId, groupError: opened.groupError,
-      tabId: tab.id, windowId: tab.windowId, active: tab.active === true,
+      tabId: tab.id, windowId: tab.windowId, active: tab.active === true, ...browserModeInfo(tab),
       windowFocusedBefore: beforeWindow.focused === true, windowFocusedAfter: afterWindow.focused === true,
       requestedActive: false, authorized: !revoked.has(tab.id) && (autoAuthorize || authorized.has(tab.id)),
       verificationRequired: '请按返回的新tabId读取；未授权时需用户授权，不能自动激活页面。' };
@@ -813,7 +844,7 @@ async function execute(command, check = () => {}) {
     throw new Error('不支持的方法');
   }
   const tabId = requireTabId(params.tabId);
-  return withTab(tabId, async () => {
+  const result = await withTab(tabId, async () => {
     check();
     const agent = async (operation, value) => {
       check();
@@ -1019,6 +1050,7 @@ async function execute(command, check = () => {}) {
       }
     }
   });
+  return { ...result, ...check.tabBrowserMode };
 }
 
 function connectionChanged() {
@@ -1051,7 +1083,7 @@ async function bridgeFetch(path, body, timeout = 25000) {
   try {
     return await bounded(fetch(`http://127.0.0.1:${bridgePort}${path}`, {
       method: body === undefined ? 'GET' : 'POST',
-      headers: { 'X-Client-Id': chrome.runtime.id, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+      headers: { 'X-Client-Id': chrome.runtime.id, ...(body === undefined && path === '/poll' ? { 'X-Browser-Mode-Protocol': '1' } : {}), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
       body: body === undefined ? undefined : JSON.stringify(body),
       cache: 'no-store',
       credentials: 'omit',
