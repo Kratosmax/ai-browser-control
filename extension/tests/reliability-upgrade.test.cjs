@@ -9,19 +9,25 @@ function legacyHarness(){
   module._compile(harnessSource.replace(/const pageSource = [^;]+;/,'const pageSource = '+JSON.stringify(legacy)+';')+'\nmodule.exports=pageHarness;',filename);
   return module.exports();
 }
-test('new page agent coexists with immutable legacy9 and never adopts its references',async()=>{
+test('page agent 11 coexists with immutable legacy9 and never adopts its references',async()=>{
   const h=legacyHarness(),old=h.context.__aiBrowserPageAgent9;
   h.node('button',{},'Stable target');vm.runInContext('Date.now=()=>1700000000000',h.context);
   const source=fs.readFileSync(path.join(__dirname,'../page-agent.js'),'utf8');vm.runInContext(source,h.context);
-  const next=h.context.__aiBrowserPageAgent10;assert(next&&next!==old);assert.equal(h.context.__aiBrowserPageAgent9,old);
-  assert.equal(h.context.__aiBrowserPageAgent8,next);assert.equal((await old.snapshot()).legacy,true);
+  const next=h.context.__aiBrowserPageAgent11;assert(next&&next!==old);assert(Object.isFrozen(next));
+  assert.equal(h.context.__aiBrowserPageAgent9,old);
+  assert.equal(h.context.__aiBrowserPageAgent10,next);assert.equal(h.context.__aiBrowserPageAgent8,next);
+  assert.equal((await old.snapshot()).legacy,true);
+  try { h.context.__aiBrowserPageAgent11={}; } catch { /* strict写入被拒 */ }
+  assert.equal(h.context.__aiBrowserPageAgent11,next);
+  vm.runInContext('Date.now=()=>1700000000123',h.context);
   const first=await next.snapshot({load:'current'});assert.equal(first.__zcodeError,undefined);
-  const item=first.elements[0];assert.equal(Number(item.ref.slice(1).split('-')[0])%100,10);
+  const item=first.elements[0];assert.equal(Number(item.ref.slice(1).split('-')[0])%100,11);
   assert.equal((await next.prepare('r1700000000001-1')).__zcodeCode,'STALE_REF');
-  vm.runInContext(source,h.context);assert.equal(h.context.__aiBrowserPageAgent10,next);
+  vm.runInContext(source,h.context);assert.equal(h.context.__aiBrowserPageAgent11,next);
+  assert.equal(h.context.__aiBrowserPageAgent10,next);assert.equal(h.context.__aiBrowserPageAgent8,next);
   assert.equal((await next.prepare(item.ref)).target.name,'Stable target');
   const second=await next.snapshot({load:'current'});assert.notEqual(second.elements[0].ref,item.ref);
-  assert.equal(Number(second.elements[0].ref.slice(1).split('-')[0])%100,10);
+  assert.equal(Number(second.elements[0].ref.slice(1).split('-')[0])%100,11);
 });
 
 test('native named form property cannot shadow an attribute method or leak password value',async()=>{

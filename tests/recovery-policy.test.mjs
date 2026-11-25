@@ -62,3 +62,27 @@ test('browser mode faults give fixed guidance without mode switching, permission
   assert.equal(new Set([mismatch.category, noWindow.category, update.category]).size, 3);
   assert.equal(recoveryForError({ code: 'CDP_DISABLED' }).category, 'permission');
 });
+
+test('committed non-HTTP(S) tab URLs get fixed task-list recovery guidance, never list_tabs or URL echo', () => {
+  const notDispatched = recoveryForError({ code: 'UNSUPPORTED_TAB_URL', outcome: 'not-dispatched' });
+  assert.equal(notDispatched.category, 'unsupported-tab-url');
+  assert.equal(notDispatched.action, 'verify-tab-url');
+  assert.equal(notDispatched.maintenanceRequired, false);
+  assert.equal(notDispatched.outcome, 'not-dispatched');
+  assert.equal(notDispatched.automaticReplay, false);
+  // list_tabs 只列 HTTP(S) 页，恢复指引必须指向任务范围内的 browser_task list。
+  assert.match(notDispatched.instruction, /browser_task/); assert.match(notDispatched.instruction, /list/);
+  assert.match(notDispatched.instruction, /browser_list_tabs/); assert.match(notDispatched.instruction, /只列HTTP/);
+  assert.match(notDispatched.instruction, /任务范围/); assert.match(notDispatched.instruction, /url\/pendingUrl|实际地址/);
+  // 恢复只允许显式已授权的 HTTP(S) navigate；未知结果不得当作未派发。
+  assert.match(notDispatched.instruction, /navigate/); assert.match(notDispatched.instruction, /明确HTTP/);
+  assert.match(notDispatched.instruction, /已授权/); assert.match(notDispatched.instruction, /不重放/);
+  const unverified = recoveryForError({ code: 'UNSUPPORTED_TAB_URL' });
+  assert.equal(unverified.outcome, 'unverified'); assert.equal(unverified.automaticReplay, false);
+  const targetState = recoveryForError({ code: 'UNSUPPORTED_TARGET' });
+  const lifecycle = recoveryForError({ code: 'TAB_FROZEN' });
+  assert.equal(new Set([notDispatched.category, targetState.category, lifecycle.category]).size, 3);
+  const echoed = recoveryForError(Object.freeze({ code: 'UNSUPPORTED_TAB_URL', outcome: 'not-dispatched',
+    diagnostic: { protocol: 'PRIVATE-PROTOCOL', url: 'PRIVATE-URL', otherExtension: 'PRIVATE-STRING' }, message: 'PRIVATE-DETAIL' }));
+  assert(!JSON.stringify(echoed).includes('PRIVATE'));
+});

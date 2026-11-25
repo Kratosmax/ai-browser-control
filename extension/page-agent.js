@@ -2,13 +2,13 @@
   'use strict';
 
   // 注入到隔离世界；重复注入保留当前引用，不接收网页脚本指令。
-  if (globalThis.__aiBrowserPageAgent10) return;
-  // 旧代理不可覆盖；新后台使用10，旧调用方仅在首次注入时获得兼容别名。
-  const previousAgent = globalThis.__aiBrowserPageAgent9 || globalThis.__aiBrowserPageAgent8;
+  if (globalThis.__aiBrowserPageAgent11) return;
+  // 旧代理不可覆盖；新后台使用11，旧调用方仅在首次注入时获得兼容别名。
+  const previousAgent = globalThis.__aiBrowserPageAgent10 || globalThis.__aiBrowserPageAgent9 || globalThis.__aiBrowserPageAgent8;
   if (previousAgent) void previousAgent.hideCursor?.();
 
-  // 代次保留mod100=10的命名空间，避免同一毫秒升级后误认旧9的ref。
-  let generation = Date.now() * 100 + 10;
+  // 代次保留mod100=11的命名空间，避免同一毫秒升级后误认旧10的ref。
+  let generation = Date.now() * 100 + 11;
   let refs = new Map();
   let refUrl = location.href;
   let refDocument = document.documentElement;
@@ -565,6 +565,123 @@
     return text;
   }
 
+  // iframe元数据只描述来源与可读性：不回传srcdoc内容、非HTTP载荷或userinfo。
+  // URL只在工具结果中原样给出，绝不写日志；超长URL只留truncated标记，不给任何URL值，避免截断值伪装成可用链接。
+  const FRAME_LIST_LIMIT = 32;
+  const FRAME_URL_LIMIT = 2048;
+  function parseHttpUrl(value, base) {
+    if (typeof value !== 'string' || !value) return null;
+    let parsed;
+    try { parsed = new URL(value, base || undefined); } catch { return null; }
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed : null;
+  }
+  function boundHttpUrl(parsed) {
+    // userinfo永不回显；超长URL不输出任何URL值，只置truncated标记；origin等元数据仍照常计算。
+    if (parsed.username || parsed.password) { parsed.username = ''; parsed.password = ''; }
+    const href = parsed.href;
+    return href.length > FRAME_URL_LIMIT ? { url: null, truncated: true } : { url: href, truncated: false };
+  }
+  function frameProperty(frame, property) {
+    // 优先原生原型getter读取反射属性；页面包装或mock缺失时安全回退attribute。
+    try {
+      const descriptor = typeof HTMLIFrameElement === 'function' ?
+        Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, property) : null;
+      if (descriptor?.get) {
+        const value = descriptor.get.call(frame);
+        if (typeof value === 'string') return value;
+      }
+    } catch { /* 原生getter不可用，回退attribute */ }
+    try { return elementMethod(frame, 'getAttribute', property); } catch { return null; }
+  }
+  function readableFrameDocument(frame) {
+    try {
+      const doc = frame.contentDocument;
+      return doc && typeof doc === 'object' ? doc : null;
+    } catch { return null; }
+  }
+  function frameLocation(doc) {
+    try {
+      const loc = doc?.location;
+      return loc && typeof loc === 'object' ? loc : null;
+    } catch { return null; }
+  }
+  function frameEntry(frame) {
+    const entry = { kind: 'noSrc', src: null, srcTruncated: false, url: null, urlTruncated: false,
+      origin: null, crossOrigin: null, originSource: null, sandboxOpaque: null, documentAccessible: false, note: null };
+    let base = null, ownerOrigin = null;
+    try { base = typeof document.baseURI === 'string' ? document.baseURI : null; } catch { /* 保持null */ }
+    try { ownerOrigin = parseHttpUrl(location.origin) ? location.origin : null; } catch { /* 保持null */ }
+    let attrPresent = false, sandboxPresent = false, sandboxTokens = [];
+    try {
+      const srcAttr = elementMethod(frame, 'hasAttribute', 'src') ? elementMethod(frame, 'getAttribute', 'src') : null;
+      // src=""等同于无src：浏览器按空白文档处理，不能当作requested来源。
+      attrPresent = typeof srcAttr === 'string' && srcAttr !== '';
+      const sandbox = elementMethod(frame, 'getAttribute', 'sandbox');
+      if (typeof sandbox === 'string') { sandboxPresent = true; sandboxTokens = sandbox.split(/\s+/).filter(Boolean); }
+    } catch { /* 元数据尽力而为 */ }
+    let srcdocPresent = false;
+    try { srcdocPresent = Boolean(elementMethod(frame, 'hasAttribute', 'srcdoc')); } catch { /* 保持false */ }
+    // srcdoc标记优先于src属性；srcdoc内容永不读取或回传。
+    entry.kind = srcdocPresent ? 'srcdoc' : attrPresent ? 'src' : 'noSrc';
+    const requested = entry.kind === 'src' ? parseHttpUrl(frameProperty(frame, 'src'), base) : null;
+    if (requested) {
+      const bound = boundHttpUrl(requested);
+      entry.src = bound.url;
+      entry.srcTruncated = bound.truncated;
+    }
+    const doc = readableFrameDocument(frame);
+    entry.documentAccessible = Boolean(doc);
+    const loc = doc ? frameLocation(doc) : null;
+    let actualOrigin = null;
+    if (doc) {
+      try {
+        const origin = loc?.origin;
+        if (typeof origin === 'string' && origin && origin !== 'null' && parseHttpUrl(origin)) actualOrigin = origin;
+      } catch { /* 保持null */ }
+      if (!actualOrigin) {
+        try {
+          const parsed = parseHttpUrl(loc?.href);
+          if (parsed) actualOrigin = parsed.origin;
+        } catch { /* 保持null */ }
+      }
+      try {
+        const parsed = parseHttpUrl(loc?.href);
+        if (parsed) {
+          const bound = boundHttpUrl(parsed);
+          entry.url = bound.url;
+          entry.urlTruncated = bound.truncated;
+        }
+      } catch { /* 保持null */ }
+    }
+    // opaque判定：属性未允许same-origin即视为opaque；能读到真实origin或文档本身即可判非opaque。
+    entry.sandboxOpaque = sandboxPresent && !sandboxTokens.includes('allow-same-origin') ? true :
+      (doc || sandboxPresent || actualOrigin) ? false : null;
+    if (doc) {
+      if (actualOrigin) {
+        entry.origin = actualOrigin;
+        entry.crossOrigin = ownerOrigin ? actualOrigin !== ownerOrigin : false;
+        entry.originSource = 'document';
+      } else if (requested) {
+        // 文档可读（如同源about:blank继承）但origin不可读：origin按requested说明，可读即非跨源。
+        entry.origin = requested.origin;
+        entry.crossOrigin = false;
+        entry.originSource = 'src';
+      } else {
+        entry.crossOrigin = false;
+      }
+    } else if (requested) {
+      entry.origin = requested.origin;
+      entry.crossOrigin = ownerOrigin ? requested.origin !== ownerOrigin : null;
+      entry.originSource = 'src';
+    }
+    if (entry.sandboxOpaque) {
+      entry.note = 'sandbox omits allow-same-origin; the framed document origin is opaque and origin fields are best-effort';
+    } else if (sandboxPresent && !doc) {
+      entry.note = 'sandbox preserves origin but the framed document is not readable; origin fields describe the requested src';
+    }
+    return entry;
+  }
+
   function snapshotPage(cache, offset) {
     const records = cache.ordered.slice(offset, offset + cache.query.limit);
     // Selection honors popup/viewport priority; each batch retains readable DOM order.
@@ -618,7 +735,7 @@
     const load = options.load ?? 'auto';
     if (!['auto', 'current'].includes(load)) throw snapshotError('INVALID_PARAMS', 'load 必须为 auto 或 current');
     const query = snapshotQuery(options), request = ++snapshotRequest;
-    generation = Math.max(generation + 100, Date.now() * 100 + 10);
+    generation = Math.max(generation + 100, Date.now() * 100 + 11);
     refs = new Map();
     snapshotCache = null;
     refUrl = location.href;
@@ -637,7 +754,8 @@
     snapshotCache = { query, snapshotId, records, ordered, cursors: new Map(),
       cursorBase: snapshotId + '.' + Math.random().toString(36).slice(2),
       base: { title: document.title, url: location.href, text: text.slice(0, 12000), textLength: text.length,
-        frames: iframes.length, loading,
+        frames: iframes.length, frameList: iframes.slice(0, FRAME_LIST_LIMIT).map(frameEntry),
+        frameListTruncated: iframes.length > FRAME_LIST_LIMIT, loading,
         coverage: { scope: 'loaded-dom', requestedScope, scopeFound,
           scopeNote: scopeFound ? '仅当前已加载 DOM；匹配总数不代表业务全量。' : '未找到可见的 ' + requestedScope + ' 区域；没有回退到整页。',
           selectionPriority: scanned.popupCount ? 'popup-then-viewport' : 'viewport-first',
@@ -1071,7 +1189,8 @@
   };
 
   Object.freeze(agent);
-  Object.defineProperty(globalThis, '__aiBrowserPageAgent10', { value: agent, configurable: false, writable: false });
+  Object.defineProperty(globalThis, '__aiBrowserPageAgent11', { value: agent, configurable: false, writable: false });
+  if (!globalThis.__aiBrowserPageAgent10) Object.defineProperty(globalThis, '__aiBrowserPageAgent10', { value: agent, configurable: false, writable: false });
   if (!globalThis.__aiBrowserPageAgent9) Object.defineProperty(globalThis, '__aiBrowserPageAgent9', { value: agent, configurable: false, writable: false });
   if (!globalThis.__aiBrowserPageAgent8) Object.defineProperty(globalThis, '__aiBrowserPageAgent8', { value: agent, configurable: false, writable: false });
 })();

@@ -51,6 +51,11 @@ globalThis.AiBrowserTasks = class {
     this.assertMode(window, mode);
     if (window.type !== undefined && window.type !== 'normal') throw Object.assign(new Error('没有普通浏览器窗口'), { code: 'NO_BROWSER_WINDOW', outcome: 'not-dispatched' });
   }
+  // 任务列表实时字段：url/pendingUrl 来自浏览器当前页，不写入归属记录、不持久化；注册键 key 保持不变。
+  liveView(tab) {
+    return { ...this.tabs.get(tab.id), ...this.modeInfo(tab), url: tab.url,
+      ...(typeof tab.pendingUrl === 'string' ? { pendingUrl: tab.pendingUrl } : {}) };
+  }
   async live(taskId, mode = 'regular') {
     const all = await this.chrome.tabs.query({});
     const actual = new Map(all.map(tab => [tab.id, tab]));
@@ -213,7 +218,7 @@ globalThis.AiBrowserTasks = class {
     }
     await this.save();
     return { taskId, adopted, adoptedCount: adopted.length, requestedCount: params.pages.length, skipped,
-      tabs: (await this.live(taskId, mode)).map(tab => ({ ...this.tabs.get(tab.id), ...this.modeInfo(tab) })),
+      tabs: (await this.live(taskId, mode)).map(tab => this.liveView(tab)),
       verificationRequired: 'adopt仅登记agent明确提交的历史证据声明（agent-attested）；插件不能独立验证reference真伪，不表示已关闭页面。' };
   }
   async task(params, check = () => {}) {
@@ -260,7 +265,7 @@ globalThis.AiBrowserTasks = class {
       }
       await this.save();
       return { taskId, ...(params.action === 'unkeep' ? { unkept, skipped, requestedCount: params.tabIds.length } : { skipped }),
-        tabs: live.map(tab => ({ ...this.tabs.get(tab.id), ...this.modeInfo(tab) })) };
+        tabs: live.map(tab => this.liveView(tab)) };
     });
   }
   async open(params, windowId, check = () => {}) {

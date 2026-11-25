@@ -51,7 +51,10 @@ const PHASES = new Set(['queue', 'tabs.get', 'tabs.query', 'tabs.update', 'tabs.
   'domHover', 'holdHover', 'pointerClick', 'domDrag', 'select', 'waitFor',
   'Input.dispatchMouseEvent', 'Input.dispatchKeyEvent', 'Input.insertText', 'Page.captureScreenshot', 'Page.setWebLifecycleState']);
 
-const PAGE_RESULT_ERROR_CODES = new Set(["PAGE_AGENT_EMPTY_RESULT","PAGE_AGENT_NO_RESULT","PAGE_AGENT_INVALID_RESULT","PAGE_AGENT_API_ERROR","PAGE_AGENT_NOT_READY","PAGE_AGENT_METHOD_MISSING","PAGE_AGENT_SYNC_THROW","PAGE_AGENT_PROMISE_REJECTED","PAGE_AGENT_SERIALIZE_FAILED","PAGE_AGENT_DOCUMENT_CHANGED","PAGE_AGENT_FRAME_MISMATCH","PAGE_AGENT_INVALID_OPERATION","PAGE_AGENT_COMMAND_EXPIRED","TAB_FROZEN","TAB_DISCARDED","PAGE_WAKE_FAILED","PAGE_WAKE_TIMEOUT","CDP_DISABLED","PAGE_ACTION_FAILED","INVALID_PARAMS","INVALID_ARGUMENTS","STALE_REF","REF_EXPIRED","STALE_CURSOR","SNAPSHOT_CHANGED","ELEMENT_NOT_VISIBLE","TARGET_CHANGED","ELEMENT_DISABLED","AMBIGUOUS_TARGET","TARGET_OUTSIDE_VIEWPORT","ELEMENT_OBSCURED","UNSUPPORTED_TARGET","UNSUPPORTED_ACTION"]);
+// 提交地址只允许固定协议枚举；具体地址与扩展ID不能进入日志。
+const URL_PROTOCOLS = new Set(['http', 'https', 'about', 'blob', 'data', 'file', 'filesystem', 'javascript', 'view-source', 'devtools', 'chrome', 'edge', 'chrome-extension', 'chrome-untrusted', 'edge-extension', 'moz-extension', 'ws', 'wss']);
+
+const PAGE_RESULT_ERROR_CODES = new Set(["PAGE_AGENT_EMPTY_RESULT","PAGE_AGENT_NO_RESULT","PAGE_AGENT_INVALID_RESULT","PAGE_AGENT_API_ERROR","PAGE_AGENT_NOT_READY","PAGE_AGENT_METHOD_MISSING","PAGE_AGENT_SYNC_THROW","PAGE_AGENT_PROMISE_REJECTED","PAGE_AGENT_SERIALIZE_FAILED","PAGE_AGENT_DOCUMENT_CHANGED","PAGE_AGENT_FRAME_MISMATCH","PAGE_AGENT_INVALID_OPERATION","PAGE_AGENT_COMMAND_EXPIRED","TAB_FROZEN","TAB_DISCARDED","PAGE_WAKE_FAILED","PAGE_WAKE_TIMEOUT","CDP_DISABLED","PAGE_ACTION_FAILED","INVALID_PARAMS","INVALID_ARGUMENTS","STALE_REF","REF_EXPIRED","STALE_CURSOR","SNAPSHOT_CHANGED","ELEMENT_NOT_VISIBLE","TARGET_CHANGED","ELEMENT_DISABLED","AMBIGUOUS_TARGET","TARGET_OUTSIDE_VIEWPORT","ELEMENT_OBSCURED","UNSUPPORTED_TARGET","UNSUPPORTED_ACTION","UNSUPPORTED_TAB_URL"]);
 
 export function pageResultDiagnostic(value) {
   const out = {};
@@ -59,10 +62,11 @@ export function pageResultDiagnostic(value) {
   for (const key of ['resultCount', 'frameId', 'durationMs']) {
     if (Number.isSafeInteger(value[key]) && value[key] >= 0) out[key] = value[key];
   }
-  for (const key of ['agentPresent', 'documentChanged', 'frozen', 'discarded', 'wakeAttempted', 'wakeVerified']) if (typeof value[key] === 'boolean') out[key] = value[key];
+  for (const key of ['agentPresent', 'documentChanged', 'frozen', 'discarded', 'wakeAttempted', 'wakeVerified', 'otherExtension']) if (typeof value[key] === 'boolean') out[key] = value[key];
   if (['loading', 'complete'].includes(value.tabStatus)) out.tabStatus = value.tabStatus;
   if (PHASES.has(value.phase)) out.phase = value.phase;
   if (['preflight', 'wake', 'inject', 'invoke', 'decode', 'serialize'].includes(value.stage)) out.stage = value.stage;
+  if (URL_PROTOCOLS.has(value.protocol)) out.protocol = value.protocol;
   if (['null', 'undefined', 'object', 'array', 'number', 'string', 'boolean'].includes(value.resultKind)) out.resultKind = value.resultKind;
   if (['envelope', 'legacy', 'empty', 'no-result', 'api-error'].includes(value.transportKind)) out.transportKind = value.transportKind;
   if (PAGE_RESULT_ERROR_CODES.has(value.errorCode)) out.errorCode = value.errorCode;
@@ -83,6 +87,6 @@ export function diagnosticEvent(value) {
   if (typeof value.version === 'string' && /^\d+\.\d+\.\d+$/.test(value.version)) out.version = value.version;
   if (METHODS.has(value.method)) out.method = value.method;
   if (PHASES.has(value.phase)) out.phase = value.phase;
-  if (['ok', 'error', 'timeout', 'invalidated', 'busy'].includes(value.outcome)) out.outcome = value.outcome;
+  if (['ok', 'error', 'timeout', 'invalidated', 'busy', 'not-dispatched'].includes(value.outcome)) out.outcome = value.outcome;
   return out;
 }

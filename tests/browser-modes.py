@@ -29,6 +29,14 @@ CDP, MCP, free_port, kill_tree, until = (helpers[name] for name in ('CDP', 'MCP'
 class FixtureHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         page = b'<!doctype html><meta charset="utf-8"><title>Browser mode fixture</title><h1>Browser mode fixture</h1><button>Test control</button>'
+        if self.path == '/iframe-root':
+            page += (f'<iframe src="/same-frame"></iframe>'
+                     f'<iframe src="http://localhost:{self.server.server_port}/foreign-frame"></iframe>'
+                     '<iframe srcdoc="&lt;em&gt;Inline fixture&lt;/em&gt;"></iframe><iframe></iframe>').encode()
+        elif self.path == '/same-frame':
+            page = b'<h1>Same-origin fixture text</h1><button>Same-origin fixture control</button>'
+        elif self.path == '/foreign-frame':
+            page = '<meta charset="utf-8"><h1>账户总览</h1><button>月账单</button>'.encode()
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.send_header('Content-Length', str(len(page)))
@@ -110,6 +118,15 @@ def main():
             'chrome.storage.local.get=async(...args)=>{await qaInit;return qaGet(...args)};'
             'importScripts("background.js");')
         (copy / 'qa-bootstrap.js').write_text(bootstrap, encoding='utf-8')
+        other = run / 'fixture-extension'
+        other.mkdir()
+        (other / 'manifest.json').write_text(json.dumps({
+            'manifest_version': 3, 'name': 'Restricted page fixture', 'version': '1.0',
+            'background': {'service_worker': 'qa-foreign.js'},
+            'web_accessible_resources': [{'resources': ['page.html'], 'matches': ['http://127.0.0.1/*']}]
+        }), encoding='utf-8')
+        (other / 'qa-foreign.js').write_text('chrome.runtime.onInstalled.addListener(() => {});', encoding='utf-8')
+        (other / 'page.html').write_text('<title>Foreign extension fixture</title>', encoding='utf-8')
         bridge_log = log('bridge')
         bridge = subprocess.Popen(['node', 'server/bridge.mjs', '--bridge', '--port', str(port),
                                    '--config-dir', str(run / 'config')], cwd=ROOT, env=env,
@@ -121,8 +138,8 @@ def main():
         edge_log = log('edge')
         edge = subprocess.Popen([executable, '--headless=new', '--no-first-run', '--no-default-browser-check',
                                  '--remote-allow-origins=*', '--remote-debugging-port=' + str(debug_port),
-                                 '--user-data-dir=' + str(run / 'profile'), '--disable-extensions-except=' + str(copy),
-                                 '--load-extension=' + str(copy), base + '/regular'], env=env,
+                                 '--user-data-dir=' + str(run / 'profile'), '--disable-extensions-except=' + str(copy) + ',' + str(other),
+                                 '--load-extension=' + str(copy) + ',' + str(other), base + '/regular'], env=env,
                                 stdout=edge_log, stderr=edge_log)
         version = until(lambda: url_json(f'http://127.0.0.1:{debug_port}/json/version'), label='private Edge startup')
         report['browser'] = version['Browser']
@@ -218,6 +235,45 @@ def main():
               finished['closed'] == [mode_regular['tabId']] and info(mode_private['tabId'])['incognito'] is True)
         last_focused = js('chrome.windows.getLastFocused().then(w=>w.id)')
         check('Mode operations preserve the focused incognito window', last_focused == private['id'])
+        # Verify ordinary HTTP routing in the same isolated profile and through stdio MCP.
+        pane = {'taskId': 'target-fixture', 'taskName': 'Target fixture'}
+        root_tab = success('open', url=base + '/iframe-root', **pane)['tabId']
+        wait_loaded = lambda tab: until(lambda: js(f'chrome.tabs.get({tab}).then(t=>t.status==="complete")'), label='test tab load')
+        wait_loaded(root_tab)
+        root = success('snapshot', tabId=root_tab, load='current', format='compact')
+        frames = root['frameList']
+        foreign = next(item for item in frames if item.get('crossOrigin') is True)
+        check('Snapshot preserves count and same-origin text, and identifies the cross-origin iframe',
+              root['frames'] == len(frames) == 4 and '[iframe]' in root['text']
+              and 'Same-origin fixture text' in root['text'] and '账户总览' not in root['text']
+              and foreign['origin'] == f'http://localhost:{fixture.server_port}'
+              and foreign['src'].endswith('/foreign-frame')
+              and {item['kind'] for item in frames} == {'src', 'srcdoc', 'noSrc'})
+        child = success('open', url=foreign['src'], **pane)['tabId']
+        wait_loaded(child)
+        child_page = success('snapshot', tabId=child, load='current', name='月账单', exact=True)
+        check('Opening the fixture iframe src separately exposes a normal actionable ref',
+              '账户总览' in child_page['text'] and len(child_page['elements']) == 1 and child_page['elements'][0]['ref'].startswith('r'))
+        success('focus', tabId=child, ref=child_page['elements'][0]['ref'])
+        other_target = until(lambda: next((t for t in cdp.call('Target.getTargets')['targetInfos']
+            if t['type'] == 'service_worker' and t['url'].endswith('/qa-foreign.js')), None), label='other fixture extension')
+        other_url = other_target['url'].removesuffix('qa-foreign.js') + 'page.html'
+        js(f'chrome.tabs.update({root_tab}, {{url:{json.dumps(other_url)}}})')
+        until(lambda: js(f'chrome.tabs.get({root_tab}).then(t=>t.url==={json.dumps(other_url)}&&t.status==="complete")'), label='foreign extension commit')
+        listing = success('task', taskId=pane['taskId'], action='list')['tabs']
+        listed = next(tab for tab in listing if tab['id'] == root_tab)
+        check('Browser task reports committed browser URL separately from the registration key',
+              listed['url'] == other_url and listed['key'] == 'url:' + base + '/iframe-root')
+        js('ready.then(()=>handlePopup({type:"set_screenshot_cdp_enabled",enabled:true}))')
+        for method, params in [('snapshot', {'load': 'current'}), ('screenshot', {})]:
+            blocked = error(method, 'UNSUPPORTED_TAB_URL', tabId=root_tab, **params)
+            check(f'{method} stops at preflight on a different extension page',
+                  blocked['diagnostic']['phase'] == 'tabs.get' and blocked['diagnostic']['stage'] == 'preflight'
+                  and blocked['recovery']['maintenanceRequired'] is False)
+        check('Explicit authorized navigation recovers the same tab to HTTP',
+              success('navigate', tabId=root_tab, url=base + '/regular')['navigated'] is True)
+        wait_loaded(root_tab)
+        check('Snapshot works again on the recovered tab', success('snapshot', tabId=root_tab, load='current')['title'] == 'Browser mode fixture')
         # Remove regular windows only in this fresh test profile, to verify the converse absence.
         js('chrome.windows.getAll().then(ws=>Promise.all(ws.filter(w=>!w.incognito).map(w=>chrome.windows.remove(w.id))))')
         error('open', 'NO_BROWSER_WINDOW', **open_args)

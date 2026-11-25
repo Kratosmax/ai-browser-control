@@ -8,6 +8,7 @@ policy(['STALE_REF','REF_EXPIRED','STALE_CURSOR','SNAPSHOT_CHANGED','TARGET_CHAN
 policy(['AMBIGUOUS_TARGET'],'ambiguous-target','disambiguate-target',false,'补充能区分同名目标的业务上下文，核对同一对象后再发起新请求。');
 policy(['ELEMENT_NOT_VISIBLE','ELEMENT_DISABLED','ELEMENT_OBSCURED','TARGET_OUTSIDE_VIEWPORT','UNSUPPORTED_TARGET','UNSUPPORTED_ACTION'],
   'target-state','inspect-target-state',false,'核对目标当前可见、禁用、遮挡和能力状态；保留当前进度，不绕过限制。');
+policy(['UNSUPPORTED_TAB_URL'],'unsupported-tab-url','verify-tab-url',false,'目标页已提交为非 HTTP(S) 地址（如其他扩展页或浏览器内部页），当前步骤已停止，请核对outcome。browser_list_tabs只列HTTP(S)页，看不到该页；请用browser_task的list在已知任务范围内核对实际地址（url/pendingUrl），确认后仅通过已授权的navigate指向明确HTTP(S)地址恢复，或改选其他受支持的页面；不重放、不猜测页面内容。');
 policy(['TAB_FROZEN','TAB_DISCARDED'],'page-lifecycle','verify-page-lifecycle',false,'确认该页生命周期及旧操作状态；仅使用已有授权的恢复入口，再重新定位，不自动切页、刷新或重放。');
 policy(['TAB_BUSY'],'operation-running','verify-original-operation',false,'本次未派发不代表旧操作失败；检查原命令和operation，等底层实际结束，不清锁或重放。');
 policy(['COMMAND_NOT_DISPATCHED'],'connection','restore-connection',false,'确认正式命令通道和实际版本恢复，再在原授权范围发起新请求；不自动重放。');

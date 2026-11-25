@@ -82,7 +82,7 @@ let diagnosticTimer = null;
 let diagnosticSending = null;
 let diagnosticSaving = false;
 
-const PAGE_RESULT_ERROR_CODES = new Set(["PAGE_AGENT_EMPTY_RESULT","PAGE_AGENT_NO_RESULT","PAGE_AGENT_INVALID_RESULT","PAGE_AGENT_API_ERROR","PAGE_AGENT_NOT_READY","PAGE_AGENT_METHOD_MISSING","PAGE_AGENT_SYNC_THROW","PAGE_AGENT_PROMISE_REJECTED","PAGE_AGENT_SERIALIZE_FAILED","PAGE_AGENT_DOCUMENT_CHANGED","PAGE_AGENT_FRAME_MISMATCH","PAGE_AGENT_INVALID_OPERATION","PAGE_AGENT_COMMAND_EXPIRED","TAB_FROZEN","TAB_DISCARDED","PAGE_WAKE_FAILED","PAGE_WAKE_TIMEOUT","CDP_DISABLED","PAGE_ACTION_FAILED","INVALID_PARAMS","INVALID_ARGUMENTS","STALE_REF","REF_EXPIRED","STALE_CURSOR","SNAPSHOT_CHANGED","ELEMENT_NOT_VISIBLE","TARGET_CHANGED","ELEMENT_DISABLED","AMBIGUOUS_TARGET","TARGET_OUTSIDE_VIEWPORT","ELEMENT_OBSCURED","UNSUPPORTED_TARGET","UNSUPPORTED_ACTION"]);
+const PAGE_RESULT_ERROR_CODES = new Set(["PAGE_AGENT_EMPTY_RESULT","PAGE_AGENT_NO_RESULT","PAGE_AGENT_INVALID_RESULT","PAGE_AGENT_API_ERROR","PAGE_AGENT_NOT_READY","PAGE_AGENT_METHOD_MISSING","PAGE_AGENT_SYNC_THROW","PAGE_AGENT_PROMISE_REJECTED","PAGE_AGENT_SERIALIZE_FAILED","PAGE_AGENT_DOCUMENT_CHANGED","PAGE_AGENT_FRAME_MISMATCH","PAGE_AGENT_INVALID_OPERATION","PAGE_AGENT_COMMAND_EXPIRED","TAB_FROZEN","TAB_DISCARDED","PAGE_WAKE_FAILED","PAGE_WAKE_TIMEOUT","CDP_DISABLED","PAGE_ACTION_FAILED","INVALID_PARAMS","INVALID_ARGUMENTS","STALE_REF","REF_EXPIRED","STALE_CURSOR","SNAPSHOT_CHANGED","ELEMENT_NOT_VISIBLE","TARGET_CHANGED","ELEMENT_DISABLED","AMBIGUOUS_TARGET","TARGET_OUTSIDE_VIEWPORT","ELEMENT_OBSCURED","UNSUPPORTED_TARGET","UNSUPPORTED_ACTION","UNSUPPORTED_TAB_URL"]);
 
 const COMMAND_PHASES = new Set(['queue', 'tabs.get', 'tabs.query', 'tabs.update', 'tabs.create', 'windows.get', 'windows.getLastFocused', 'tabs.captureVisibleTab', 'debugger.attach', 'debugger.detach', 'scripting.inject', 'snapshot', 'scroll', 'inspect', 'prepare', 'focus', 'focusTarget', 'showCursor', 'cursorPulse', 'hideCursor', 'domClick', 'domFill', 'domPress', 'domHover', 'holdHover', 'pointerClick', 'domDrag', 'select', 'waitFor', 'Input.dispatchMouseEvent', 'Input.dispatchKeyEvent', 'Input.insertText', 'Page.captureScreenshot', 'Page.setWebLifecycleState']);
 
@@ -93,10 +93,11 @@ function pageResultDiagnostic(value) {
   for (const key of ['resultCount', 'frameId', 'durationMs']) {
     if (Number.isSafeInteger(value[key]) && value[key] >= 0) out[key] = value[key];
   }
-  for (const key of ['agentPresent', 'documentChanged', 'frozen', 'discarded', 'wakeAttempted', 'wakeVerified']) if (typeof value[key] === 'boolean') out[key] = value[key];
+  for (const key of ['agentPresent', 'documentChanged', 'frozen', 'discarded', 'wakeAttempted', 'wakeVerified', 'otherExtension']) if (typeof value[key] === 'boolean') out[key] = value[key];
   if (['loading', 'complete'].includes(value.tabStatus)) out.tabStatus = value.tabStatus;
   if (COMMAND_PHASES.has(value.phase)) out.phase = value.phase;
   if (['preflight', 'wake', 'inject', 'invoke', 'decode', 'serialize'].includes(value.stage)) out.stage = value.stage;
+  if (URL_PROTOCOLS.has(value.protocol)) out.protocol = value.protocol;
   if (['null', 'undefined', 'object', 'array', 'number', 'string', 'boolean'].includes(value.resultKind)) out.resultKind = value.resultKind;
   if (['envelope', 'legacy', 'empty', 'no-result', 'api-error'].includes(value.transportKind)) out.transportKind = value.transportKind;
   if (PAGE_RESULT_ERROR_CODES.has(value.errorCode)) out.errorCode = value.errorCode;
@@ -220,6 +221,43 @@ function isHttpUrl(url) {
   }
 }
 
+// 诊断只收固定协议枚举；具体地址、扩展ID与页面内容不能进入日志或回执。
+const URL_PROTOCOLS = new Set(['http', 'https', 'about', 'blob', 'data', 'file', 'filesystem', 'javascript', 'view-source', 'devtools', 'chrome', 'edge', 'chrome-extension', 'chrome-untrusted', 'edge-extension', 'moz-extension', 'ws', 'wss']);
+
+// 按实际已提交地址生成固定证据：仅白名单协议枚举与是否其他扩展页布尔值。
+function committedUrlDiagnostic(url) {
+  let protocol;
+  try { protocol = new URL(url).protocol.replace(/:$/, ''); } catch {}
+  if (!URL_PROTOCOLS.has(protocol)) protocol = undefined;
+  let otherExtension;
+  if (['chrome-extension', 'edge-extension', 'moz-extension'].includes(protocol)) {
+    try { otherExtension = new URL(url).host !== chrome.runtime.id; }
+    catch { otherExtension = true; }
+  }
+  return pageResultDiagnostic({ stage: 'preflight', phase: 'tabs.get', errorCode: 'UNSUPPORTED_TAB_URL', protocol, otherExtension });
+}
+
+// 已提交为非 HTTP(S) 的页面（其他扩展页、浏览器内部页等）不能注入或附加；
+// 固定证据不携带具体地址，不猜测页面内容。
+function unsupportedTabUrl(url, check) {
+  const outcome = check.pageWorkStarted ? 'unverified' : 'not-dispatched';
+  return Object.assign(new Error('仅允许操作 HTTP(S) 标签页；该页已提交为不支持的地址，当前步骤已停止。'), {
+    code: 'UNSUPPORTED_TAB_URL', outcome, diagnostic: committedUrlDiagnostic(url)
+  });
+}
+
+// 预检通过后浏览器把标签页提交到其他扩展页的竞态：附加失败即动作未派发。
+// 重新核对提交后的实际地址：仍不支持则归类；又变回 HTTP(S) 则保留保守的未派发结果。
+// 两种方向都不回退到其它方式，也不重放。
+async function restrictedTargetError(error, tabId, check = () => {}) {
+  if (!/Cannot access a (?:chrome|edge)-extension:\/\/ URL of different extension/i.test(errorMessage(error))) return error;
+  let url;
+  try { url = (await chrome.tabs.get(tabId)).url; } catch { url = undefined; }
+  check();
+  if (typeof url === 'string' && !isHttpUrl(url)) return unsupportedTabUrl(url, check);
+  return Object.assign(error, { outcome: check.pageWorkStarted ? 'unverified' : 'not-dispatched', restrictedTargetRace: true });
+}
+
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
@@ -255,11 +293,12 @@ function normalBrowserWindow(window) { return Number.isInteger(window?.id) && wi
 // 核对页面访问授权；冻结页是否可临时唤醒由独立生命周期用途决定。
 async function ensureAllowed(tabId, check = () => {}) {
   const tab = await browserStep(check, 'tabs.get', () => chrome.tabs.get(tabId));
+  // 模式与授权闸门在前；随后按实际已提交地址分类，注入/附加之前拦截不支持的页面。
   if (check.browserMode !== undefined) assertBrowserMode(tab, check.browserMode);
   check.tabBrowserMode = browserModeInfo(tab);
   check.lifecycle = pageResultDiagnostic({ tabStatus: tab.status, frozen: tab.frozen, discarded: tab.discarded });
-  if (!isHttpUrl(tab.url)) throw new Error('仅允许操作 HTTP(S) 标签页');
   if (revoked.has(tabId) || (!authorized.has(tabId) && !autoAuthorize)) throw new Error('该标签页尚未手动授权或已释放，请在弹窗中授权此页');
+  if (!isHttpUrl(tab.url)) throw unsupportedTabUrl(tab.url, check);
   if (check.waitIdentity && (tab.url !== check.waitIdentity.url || tab.windowId !== check.waitIdentity.windowId)) {
     throw Object.assign(new Error('等待期间目标页面已变化，未向新页面继续探测'), {
       code: 'PAGE_AGENT_DOCUMENT_CHANGED', diagnostic: pageResultDiagnostic({stage:'preflight',phase:'tabs.get',...check.lifecycle,documentChanged:true,errorCode:'PAGE_AGENT_DOCUMENT_CHANGED'})
@@ -304,7 +343,7 @@ async function ensureAttached(tabId, purpose = 'input', check = () => {}) {
       checkCdpPermission(tabId, purpose, generation);
     } catch (error) {
       if (attached.has(tabId)) { try { await detach(tabId); } catch {} }
-      throw error;
+      throw await restrictedTargetError(error, tabId, check);
     }
   }
   if (purpose === 'input') lifecycleAttachments.delete(tabId);
@@ -553,7 +592,7 @@ async function pageAgent(tabId, operation, ref, check = () => {}) {
           if (!methods.includes(name)) return errorEnvelope('PAGE_AGENT_INVALID_OPERATION', '不支持的页面操作', 'invoke');
           // Chrome回调可能在期限后才开始；进入页面方法前拒绝，不能让迟到回调执行写入。
           if (Number.isFinite(deadline) && Date.now() >= deadline) return errorEnvelope('PAGE_AGENT_COMMAND_EXPIRED', '页面操作已过期，未调用页面方法', 'invoke');
-          const agent = globalThis.__aiBrowserPageAgent10 || globalThis.__aiBrowserPageAgent9 || globalThis.__aiBrowserPageAgent8;
+          const agent = globalThis.__aiBrowserPageAgent11 || globalThis.__aiBrowserPageAgent10 || globalThis.__aiBrowserPageAgent9 || globalThis.__aiBrowserPageAgent8;
           agentPresent = !!agent;
           if (!agent) return errorEnvelope('PAGE_AGENT_NOT_READY', '页面代理未就绪', 'invoke');
           if (typeof agent[name] !== 'function') return errorEnvelope('PAGE_AGENT_METHOD_MISSING', '页面代理缺少所需方法', 'invoke');
@@ -745,6 +784,24 @@ async function release(tabId, check = () => {}) {
   return { released: true, tabId };
 }
 
+// 已授权标签页即使已提交为不支持的地址，也可导航回明确 HTTP(S) 地址恢复；
+// 模式、授权、同页锁与 URL 校验与其他动作一致，未派发的失败按固定代码回报。
+async function navigateTab(tabId, params, check = () => {}) {
+  const tab = await browserStep(check, 'tabs.get', () => chrome.tabs.get(tabId));
+  // 模式与授权闸门在先，与原导航行为一致；随后校验目标地址，再派发导航。
+  if (check.browserMode !== undefined) assertBrowserMode(tab, check.browserMode);
+  check.tabBrowserMode = browserModeInfo(tab);
+  check.lifecycle = pageResultDiagnostic({ tabStatus: tab.status, frozen: tab.frozen, discarded: tab.discarded });
+  if (revoked.has(tabId) || (!authorized.has(tabId) && !autoAuthorize)) throw new Error('该标签页尚未手动授权或已释放，请在弹窗中授权此页');
+  if (typeof params.url !== 'string' || !isHttpUrl(params.url)) {
+    throw Object.assign(new Error('url 必须是绝对 HTTP(S) 地址'), { code: 'INVALID_ARGUMENTS', outcome: 'not-dispatched' });
+  }
+  check();
+  await browserStep(check, 'tabs.update', () => chrome.tabs.update(tabId, { url: params.url }));
+  domFallbackTabs.delete(tabId);
+  return { navigated: true, url: params.url };
+}
+
 async function detach(tabId, check = () => {}) {
   detaching.add(tabId);
   try { await browserStep(check, 'debugger.detach', () => chrome.debugger.detach({ tabId })); attached.delete(tabId); lifecycleAttachments.delete(tabId); }
@@ -871,6 +928,8 @@ async function execute(command, check = () => {}) {
     };
     // 释放允许已导航到非 HTTP(S) 的授权页恢复正常状态。
     if (method === 'release') return release(tabId, check);
+    // 导航同样允许已提交为不支持的地址的授权页恢复到明确 HTTP(S)；模式、授权、锁与地址校验保持。
+    if (method === 'navigate') return navigateTab(tabId, params, check);
     // snapshot（读取）走 ensureAllowed；写入类命令在首个 CDP 调用时经 ensureAttached 附加调试器。
     const currentTab = await ensureAllowed(tabId, check);
     const inputActions = ['click', 'hover', 'drag', 'set_checked', 'fill', 'press'];
@@ -885,6 +944,8 @@ async function execute(command, check = () => {}) {
         catch (error) {
           check();
           if (params.mode === 'cdp' || error.code === 'CDP_DISABLED') throw error;
+          // 已提交为不支持的页面或不同扩展页竞态：保守结束，不降级到DOM注入，也不重放。
+          if (error.code === 'UNSUPPORTED_TAB_URL' || error.restrictedTargetRace) throw error;
           // 仅能力附加失败且输入尚未派发时降级；撤权/执行阶段失败不能重放。
           if (attached.has(tabId)) await detach(tabId, check);
           await ensureAllowed(tabId, check);
@@ -1031,12 +1092,6 @@ async function execute(command, check = () => {}) {
         if (!useCdp) return { ...await agent('domPress', params.key), fallbackReason };
         await press(tabId, params.key, check);
         return { pressed: true, mode: 'cdp' };
-      case 'navigate':
-        if (typeof params.url !== 'string' || !isHttpUrl(params.url)) throw new Error('url 必须是绝对 HTTP(S) 地址');
-        check();
-        await browserStep(check, 'tabs.update', () => chrome.tabs.update(tabId, { url: params.url }));
-        domFallbackTabs.delete(tabId);
-        return { navigated: true, url: params.url };
       case 'screenshot': {
         if (!screenshotCdpEnabled) return visibleScreenshot(tabId, check);
         const wasAttached = attached.has(tabId);

@@ -12,6 +12,10 @@ browser_status.versionHealth仅检查MCP/桥/扩展是否对齐，状态unknown�
 
 `BROWSER_MODE_MISMATCH` 表示目标页和请求模式不同，先根据用户原意核对模式和标签。`NO_BROWSER_WINDOW` 表示匹配模式没有可用窗口。仅在用户已指定无痕场景时核对浏览器的扩展无痕权限。`BROWSER_MODE_EXTENSION_UPDATE_REQUIRED` 表示已配对扩展尚不支持模式校验，更新并重载目标扩展后核对 `browser_status.browserModeProtocol` 是否为 1。
 
+## 标签页跳转到受限地址
+
+`UNSUPPORTED_TAB_URL` 表示目标标签页已经提交到工具无法读取的协议，例如另一扩展的页面。用 `browser_task(action=list, taskId=...)` 对照实时 `url`、可能存在的 `pendingUrl` 与登记键 `key`。如果用户已授权在同一标签页访问明确的 HTTP(S) 地址，可导航回该地址并重新快照。
+
 ## 首次发现时立即执行
 
 1. 第一次出现工具不可用就停止依赖该能力的业务，立即用一句话告诉用户：“浏览器插件的某能力不可用，已停止相关操作，正在整理故障报告。”不要先花几分钟反复重试再汇报。
